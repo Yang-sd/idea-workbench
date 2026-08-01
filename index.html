@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f7f5" />
+    <title>想法台 · Idea Desk</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true"><i data-lucide="sparkles"></i></div>
+          <div>
+            <div class="brand-name">想法台</div>
+            <div class="brand-caption">IDEA DESK</div>
+          </div>
+          <button class="icon-button mobile-close" id="closeSidebar" type="button" aria-label="关闭菜单">
+            <i data-lucide="x"></i>
+          </button>
+        </div>
+
+        <button class="capture-button" id="openCapture" type="button">
+          <i data-lucide="plus"></i>
+          <span>记录一个想法</span>
+          <kbd>N</kbd>
+        </button>
+
+        <nav class="side-nav" aria-label="想法分类">
+          <div class="nav-label">工作区</div>
+          <a class="nav-item is-active" data-view="all" href="#/all">
+            <span class="nav-icon"><i data-lucide="inbox"></i></span>
+            <span>全部想法</span>
+            <span class="nav-count" data-count="all">0</span>
+          </a>
+          <a class="nav-item" data-view="inbox" href="#/inbox">
+            <span class="nav-icon"><i data-lucide="lightbulb"></i></span>
+            <span>收件箱</span>
+            <span class="nav-count" data-count="inbox">0</span>
+          </a>
+          <a class="nav-item" data-view="try" href="#/try">
+            <span class="nav-icon"><i data-lucide="flask-conical"></i></span>
+            <span>准备尝试</span>
+            <span class="nav-count" data-count="try">0</span>
+          </a>
+          <a class="nav-item" data-view="later" href="#/later">
+            <span class="nav-icon"><i data-lucide="archive"></i></span>
+            <span>以后再说</span>
+            <span class="nav-count" data-count="later">0</span>
+          </a>
+          <a class="nav-item" data-view="done" href="#/done">
+            <span class="nav-icon"><i data-lucide="circle-check"></i></span>
+            <span>已完成</span>
+            <span class="nav-count" data-count="done">0</span>
+          </a>
+        </nav>
+
+        <div class="sidebar-divider"></div>
+        <div class="nav-label">节奏</div>
+        <a class="nav-item" data-view="weekly" href="#/weekly">
+          <span class="nav-icon"><i data-lucide="calendar-days"></i></span>
+          <span>本周复盘</span>
+          <span class="nav-dot"></span>
+        </a>
+
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-footer">
+          <div class="privacy-note"><i data-lucide="shield-check"></i><span>只保存在这台设备</span></div>
+          <div class="sidebar-actions">
+            <button class="plain-action" id="exportData" type="button"><i data-lucide="download"></i>导出</button>
+            <button class="plain-action" id="importDataButton" type="button"><i data-lucide="upload"></i>导入</button>
+            <input id="importData" type="file" accept="application/json" hidden />
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <button class="icon-button menu-button" id="openSidebar" type="button" aria-label="打开菜单">
+            <i data-lucide="menu"></i>
+          </button>
+          <div class="breadcrumb"><span>我的工作区</span><i data-lucide="chevron-right"></i><strong id="breadcrumbTitle">全部想法</strong></div>
+          <div class="topbar-actions">
+            <div class="save-status"><span class="save-dot"></span><span id="saveStatus">已自动保存</span></div>
+            <button class="icon-button" id="helpButton" type="button" data-tooltip="查看快捷键" aria-label="查看快捷键"><i data-lucide="circle-help"></i></button>
+            <div class="avatar" aria-label="你的工作区">Y</div>
+          </div>
+        </header>
+
+        <div class="workspace" id="pageContent" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="captureModal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="captureTitle">
+        <div class="modal-head">
+          <div><p class="eyebrow">QUICK CAPTURE</p><h2 id="captureTitle">接住一个想法</h2></div>
+          <button class="icon-button" id="closeCapture" type="button" aria-label="关闭"><i data-lucide="x"></i></button>
+        </div>
+        <p class="modal-intro">先写下来，不用想得很完整。你可以在之后的整理里补充。</p>
+        <form id="captureForm">
+          <label class="field-label" for="captureTitleInput">一句话说清楚它 <span>*</span></label>
+          <input class="text-input input-large" id="captureTitleInput" name="title" required maxlength="80" placeholder="例如：做一个帮我拆下一步的小工具" />
+          <label class="field-label" for="captureProblemInput">它想解决什么问题？</label>
+          <textarea class="text-input" id="captureProblemInput" name="problem" rows="3" maxlength="260" placeholder="谁遇到了什么不方便？"></textarea>
+          <div class="form-row">
+            <div><label class="field-label" for="captureStatusInput">先放到</label><select class="text-input" id="captureStatusInput" name="status"><option value="inbox">收件箱</option><option value="try">准备尝试</option><option value="later">以后再说</option></select></div>
+            <div><label class="field-label" for="captureTagInput">标签 <span class="optional">可选</span></label><input class="text-input" id="captureTagInput" name="tags" placeholder="产品, 学习" /></div>
+          </div>
+          <div class="capture-next"><i data-lucide="move-right"></i><div><strong>下一步以后再补</strong><span>现在只需要让它不再从脑海里消失。</span></div></div>
+          <div class="modal-actions"><button class="button ghost-button" id="cancelCapture" type="button">先不记录</button><button class="button primary-button" type="submit"><i data-lucide="save"></i>放进我的工作区</button></div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="shortcutsModal" hidden>
+      <section class="modal shortcuts-modal" role="dialog" aria-modal="true" aria-labelledby="shortcutsTitle">
+        <div class="modal-head"><div><p class="eyebrow">SHORTCUTS</p><h2 id="shortcutsTitle">让记录更顺手</h2></div><button class="icon-button" id="closeShortcuts" type="button" aria-label="关闭"><i data-lucide="x"></i></button></div>
+        <div class="shortcut-row"><kbd>N</kbd><span>记录一个新想法</span></div>
+        <div class="shortcut-row"><kbd>/</kbd><span>聚焦搜索框</span></div>
+        <div class="shortcut-row"><kbd>Esc</kbd><span>关闭弹窗</span></div>
+        <div class="shortcut-row"><kbd>⌘ / Ctrl</kbd><span>快速保存当前详情</span></div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+services:
+  web:
+    build:
+      context: .
+    container_name: idea-workbench
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8184:80"
