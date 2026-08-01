@@ -22,6 +22,8 @@ docker compose up -d --build
 
 容器监听宿主机 `127.0.0.1:8184`，适合由 NAS 上的 Cloudflare Tunnel 或反向代理接入。健康检查地址是 `/healthz`。
 
+NAS 账号、目录规范、凭据读取、部署命令和 Cloudflare Tunnel 配置见 [`docs/NAS_DEPLOYMENT.md`](docs/NAS_DEPLOYMENT.md)。这份文档可以作为其他项目部署到同一台 NAS 的参考。
+
 ## 已包含
 
 - 想法收件箱，以及“准备尝试 / 以后再说 / 已完成”状态队列
