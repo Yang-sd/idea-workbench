@@ -5,6 +5,7 @@
   const ROUTES = ['all', 'inbox', 'try', 'later', 'done', 'weekly'];
   const STATUS_LABELS = { inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成' };
   const EXPERIMENT_LABELS = { not_started: '还没开始', in_progress: '进行中', completed: '已完成' };
+  const NODE_STATUS_LABELS = { not_started: '未开始', in_progress: '进行中', completed: '已完成' };
   const $ = (selector, parent) => (parent || document).querySelector(selector);
   const $$ = (selector, parent) => Array.from((parent || document).querySelectorAll(selector));
 
@@ -184,6 +185,10 @@
     tag: 'all',
     sort: 'updated'
   };
+  const projectUi = {
+    expandedNodes: new Set(),
+    bulkIdeaId: null
+  };
 
   function parseRoute() {
     const value = location.hash.replace(/^#\/?/, '');
@@ -285,6 +290,102 @@
   function currentWeekCompleted() {
     const cutoff = Date.now() - 7 * 86400000;
     return state.ideas.filter((idea) => idea.status === 'done' && new Date(idea.updatedAt).getTime() >= cutoff);
+  }
+
+  function projectNodesOf(idea) {
+    if (!Array.isArray(idea.nodes)) idea.nodes = [];
+    return idea.nodes;
+  }
+
+  function walkProjectNodes(nodes, callback) {
+    (nodes || []).forEach((node) => {
+      callback(node);
+      walkProjectNodes(node.children, callback);
+    });
+  }
+
+  function findProjectNode(idea, nodeId) {
+    let match = null;
+    walkProjectNodes(projectNodesOf(idea), (node) => {
+      if (!match && node.id === nodeId) match = node;
+    });
+    return match;
+  }
+
+  function nextProjectNodeNumber(idea) {
+    let highest = 0;
+    walkProjectNodes(projectNodesOf(idea), (node) => {
+      const match = /^P-(\d+)$/.exec(node.code || '');
+      if (match) highest = Math.max(highest, Number(match[1]));
+    });
+    const nextNumber = Math.max(highest + 1, Number(idea.nodeSequence) || 1);
+    idea.nodeSequence = nextNumber + 1;
+    return nextNumber;
+  }
+
+  function createProjectNode(code, title) {
+    const now = new Date().toISOString();
+    return {
+      id: 'node-' + uid(),
+      code,
+      title: title || '新节点',
+      content: '',
+      status: 'not_started',
+      attachments: [],
+      children: [],
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  function projectNodeStats(idea) {
+    const stats = { total: 0, completed: 0, inProgress: 0 };
+    walkProjectNodes(projectNodesOf(idea), (node) => {
+      stats.total += 1;
+      if (node.status === 'completed') stats.completed += 1;
+      if (node.status === 'in_progress') stats.inProgress += 1;
+    });
+    return stats;
+  }
+
+  function removeProjectNode(nodes, nodeId) {
+    for (let index = 0; index < nodes.length; index += 1) {
+      if (nodes[index].id === nodeId) return nodes.splice(index, 1)[0];
+      const removed = removeProjectNode(nodes[index].children || [], nodeId);
+      if (removed) return removed;
+    }
+    return null;
+  }
+
+  function projectNodeAttachmentMarkup(idea, node, attachment) {
+    return '<figure class="node-attachment"><a href="' + escapeHTML(attachment.url) + '" target="_blank" rel="noopener"><img src="' + escapeHTML(attachment.url) + '" alt="' + escapeHTML(attachment.name || '节点截图') + '" /></a><figcaption><span>' + escapeHTML(attachment.name || '截图') + '</span><button data-action="remove-node-attachment" data-id="' + idea.id + '" data-node-id="' + node.id + '" data-attachment-id="' + attachment.id + '" type="button" aria-label="删除截图"><i data-lucide="x"></i></button></figcaption></figure>';
+  }
+
+  function projectNodeMarkup(idea, node) {
+    if (!Array.isArray(node.children)) node.children = [];
+    if (!Array.isArray(node.attachments)) node.attachments = [];
+    if (!NODE_STATUS_LABELS[node.status]) node.status = 'not_started';
+    const expanded = projectUi.expandedNodes.has(node.id);
+    const statusOptions = Object.entries(NODE_STATUS_LABELS).map(([status, label]) =>
+      '<option value="' + status + '"' + (node.status === status ? ' selected' : '') + '>' + label + '</option>'
+    ).join('');
+    const attachments = node.attachments.map((attachment) => projectNodeAttachmentMarkup(idea, node, attachment)).join('');
+    const children = node.children.map((child) => projectNodeMarkup(idea, child)).join('');
+    return '<article class="project-node node-status-' + (node.status || 'not_started') + '" data-node-id="' + node.id + '" data-node-code="' + escapeHTML(node.code) + '">' +
+      '<div class="project-node-row"><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
+      '<div class="project-node-expanded"' + (expanded ? '' : ' hidden') + '><div class="project-node-body"><label><span>节点记录</span><textarea data-node-field="content" data-id="' + idea.id + '" data-node-id="' + node.id + '" rows="3" placeholder="记录说明、执行结果、AI 处理备注等">' + escapeHTML(node.content || '') + '</textarea></label><div class="node-attachments"><div class="node-attachments-head"><span>截图与图片</span><label class="node-upload-button"><i data-lucide="image-plus"></i>添加截图<input data-node-upload data-id="' + idea.id + '" data-node-id="' + node.id + '" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label></div><div class="node-attachment-grid">' + (attachments || '<span class="node-attachment-empty">还没有截图</span>') + '</div></div></div>' +
+      (children ? '<div class="project-node-children">' + children + '</div>' : '') + '</div></article>';
+  }
+
+  function projectTreeMarkup(idea) {
+    const nodes = projectNodesOf(idea);
+    const stats = projectNodeStats(idea);
+    const progress = stats.total ? Math.round((stats.completed / stats.total) * 100) : 0;
+    const bulkOpen = projectUi.bulkIdeaId === idea.id;
+    return '<section class="project-tree-section"><div class="project-tree-head"><div><p class="eyebrow">PROJECT NODES</p><h2>项目节点</h2><p>用稳定编号拆解项目，AI 可以按编号记录进度或标记完成。</p></div><div class="project-tree-actions"><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="clipboard-list"></i>批量录入</button><button class="button compact-button primary-button" data-action="add-root-node" data-id="' + idea.id + '" type="button"><i data-lucide="plus"></i>添加根节点</button></div></div>' +
+      '<div class="project-node-summary"><div><strong>' + stats.completed + '</strong><span>/ ' + stats.total + ' 已完成</span></div><div class="node-progress-track"><span style="width:' + progress + '%"></span></div><span>' + stats.inProgress + ' 个进行中</span></div>' +
+      '<div class="bulk-node-panel"' + (bulkOpen ? '' : ' hidden') + '><label for="bulkNodeInput">批量粘贴节点</label><p>每行一个节点；使用两个空格或 Tab 表示下一级。</p><textarea id="bulkNodeInput" rows="8" placeholder="产品范围\n  个人版页面\n    图片上传\n    图片预览\n  数据管理\n    删除与恢复"></textarea><div><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button">取消</button><button class="button compact-button primary-button" data-action="import-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="import"></i>导入节点</button></div></div>' +
+      '<div class="project-tree">' + (nodes.length ? nodes.map((node) => projectNodeMarkup(idea, node)).join('') : '<div class="project-tree-empty"><i data-lucide="list-tree"></i><div><strong>还没有项目节点</strong><span>添加一个根节点，或一次粘贴完整的项目清单。</span></div></div>') + '</div></section>';
   }
 
   function tagsMarkup(tags) {
@@ -438,6 +539,7 @@
     const isFocused = state.focusId === idea.id && idea.status === 'try';
     return '<a class="back-link" href="#/' + idea.status + '"><i data-lucide="arrow-left"></i>返回' + STATUS_LABELS[idea.status] + '</a>' +
       '<section class="detail-page-head"><div><div class="detail-page-meta">' + statusPill(idea) + '<span>更新于 ' + formatRelative(idea.updatedAt) + '</span></div><h1>' + escapeHTML(idea.title) + '</h1><p>在一个页面里完成判断、计划和实验记录。</p></div><button class="icon-button danger-icon" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="删除这个想法"><i data-lucide="trash-2"></i></button></section>' +
+      projectTreeMarkup(idea) +
       '<form class="editor-layout" id="detailForm" data-id="' + idea.id + '"><div class="editor-main">' +
       '<section class="editor-section"><div class="editor-section-head"><span>01</span><div><h2>想法本身</h2><p>先说清楚问题和最小版本。</p></div></div><div class="field-group"><label class="field-label" for="detailTitle">想法标题 <span>*</span></label><input class="text-input input-large" id="detailTitle" name="title" value="' + escapeHTML(idea.title) + '" maxlength="80" required /></div><div class="field-group"><label class="field-label" for="detailProblem">它在解决什么问题</label><textarea class="text-input" id="detailProblem" name="problem" rows="4">' + escapeHTML(idea.problem) + '</textarea></div><div class="form-row"><div><label class="field-label" for="detailAudience">可能会需要的人</label><textarea class="text-input" id="detailAudience" name="audience" rows="3">' + escapeHTML(idea.audience) + '</textarea></div><div><label class="field-label" for="detailMvp">我能做出的最小版本</label><textarea class="text-input" id="detailMvp" name="mvp" rows="3">' + escapeHTML(idea.mvp) + '</textarea></div></div></section>' +
       '<section class="editor-section"><div class="editor-section-head"><span>02</span><div><h2>把它往前推一步</h2><p>下一步应该能在 30 分钟内开始。</p></div></div><div class="field-group"><label class="field-label" for="detailNextAction">下一步动作</label><input class="text-input input-large" id="detailNextAction" name="nextAction" value="' + escapeHTML(idea.nextAction) + '" placeholder="一个具体动作（可选）" /></div><div class="field-group"><label class="field-label" for="detailFinishLine">完成线</label><textarea class="text-input" id="detailFinishLine" name="finishLine" rows="3">' + escapeHTML(idea.finishLine) + '</textarea></div></section></div>' +
@@ -567,6 +669,163 @@
     showToast('这个想法已经更新');
   }
 
+  function addProjectNode(ideaId, parentNodeId) {
+    const idea = ideaById(ideaId);
+    if (!idea) return;
+    const number = nextProjectNodeNumber(idea);
+    const node = createProjectNode('P-' + String(number).padStart(3, '0'), '新节点');
+    if (parentNodeId) {
+      const parentNode = findProjectNode(idea, parentNodeId);
+      if (!parentNode) return;
+      if (!Array.isArray(parentNode.children)) parentNode.children = [];
+      parentNode.children.push(node);
+      projectUi.expandedNodes.add(parentNode.id);
+    } else {
+      projectNodesOf(idea).push(node);
+    }
+    projectUi.expandedNodes.add(node.id);
+    idea.updatedAt = new Date().toISOString();
+    saveData('已添加项目节点');
+    renderApp();
+    window.setTimeout(() => $('[data-node-id="' + node.id + '"] .node-title-input')?.focus(), 0);
+  }
+
+  function deleteProjectNode(ideaId, nodeId) {
+    const idea = ideaById(ideaId);
+    const node = idea ? findProjectNode(idea, nodeId) : null;
+    if (!idea || !node) return;
+    let nodeCount = 0;
+    walkProjectNodes([node], () => { nodeCount += 1; });
+    if (!window.confirm('确定删除 ' + node.code + ' 以及它的 ' + (nodeCount - 1) + ' 个子节点吗？')) return;
+    const removed = removeProjectNode(projectNodesOf(idea), nodeId);
+    if (!removed) return;
+    walkProjectNodes([removed], (item) => {
+      (item.attachments || []).forEach((attachment) => deleteUploadedFile(attachment.url));
+      projectUi.expandedNodes.delete(item.id);
+    });
+    idea.updatedAt = new Date().toISOString();
+    saveData('已删除项目节点');
+    renderApp();
+    showToast('项目节点已删除');
+  }
+
+  function parseBulkProjectNodes(idea, input) {
+    let nextNumber = nextProjectNodeNumber(idea);
+    const roots = [];
+    const stack = [];
+    input.split(/\r?\n/).forEach((line) => {
+      if (!line.trim()) return;
+      const leading = line.match(/^[\t ]*/)?.[0] || '';
+      const tabDepth = (leading.match(/\t/g) || []).length;
+      const spaceDepth = Math.floor(leading.replace(/\t/g, '').length / 2);
+      const requestedDepth = tabDepth + spaceDepth;
+      const depth = Math.min(requestedDepth, stack.length);
+      const title = line.trim().replace(/^[-*]\s+/, '').replace(/^\d+[.)]\s+/, '').trim();
+      if (!title) return;
+      const node = createProjectNode('P-' + String(nextNumber).padStart(3, '0'), title);
+      nextNumber += 1;
+      if (depth === 0) roots.push(node);
+      else stack[depth - 1].children.push(node);
+      stack[depth] = node;
+      stack.length = depth + 1;
+    });
+    idea.nodeSequence = nextNumber;
+    return roots;
+  }
+
+  function importBulkProjectNodes(ideaId) {
+    const idea = ideaById(ideaId);
+    const input = $('#bulkNodeInput');
+    if (!idea || !input || !input.value.trim()) return;
+    const nodes = parseBulkProjectNodes(idea, input.value);
+    if (!nodes.length) {
+      showToast('没有识别到可导入的节点');
+      return;
+    }
+    projectNodesOf(idea).push(...nodes);
+    nodes.forEach((node) => projectUi.expandedNodes.add(node.id));
+    projectUi.bulkIdeaId = null;
+    idea.updatedAt = new Date().toISOString();
+    saveData('已批量导入项目节点');
+    renderApp();
+    showToast('已导入 ' + nodes.reduce((count, node) => {
+      let total = 0;
+      walkProjectNodes([node], () => { total += 1; });
+      return count + total;
+    }, 0) + ' 个节点');
+  }
+
+  function updateProjectNodeField(input) {
+    const idea = ideaById(input.dataset.id);
+    const node = idea ? findProjectNode(idea, input.dataset.nodeId) : null;
+    if (!idea || !node) return;
+    const field = input.dataset.nodeField;
+    if (field === 'status' && !NODE_STATUS_LABELS[input.value]) return;
+    node[field] = field === 'title' ? input.value.trim() || '未命名节点' : input.value.trim();
+    node.updatedAt = new Date().toISOString();
+    idea.updatedAt = node.updatedAt;
+    saveData('已保存 ' + node.code);
+    if (field === 'status') renderApp();
+  }
+
+  async function uploadProjectNodeImage(input) {
+    const file = input.files?.[0];
+    const idea = ideaById(input.dataset.id);
+    const node = idea ? findProjectNode(idea, input.dataset.nodeId) : null;
+    if (!file || !idea || !node) return;
+    if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(file.type)) {
+      showToast('请选择 PNG、JPG、GIF 或 WebP 图片');
+      input.value = '';
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      showToast('单张图片不能超过 12 MB');
+      input.value = '';
+      return;
+    }
+    const status = $('#saveStatus');
+    if (status) status.textContent = '正在上传截图...';
+    try {
+      const response = await fetch('/api/uploads?name=' + encodeURIComponent(file.name), {
+        method: 'POST',
+        headers: { 'Content-Type': file.type },
+        body: file
+      });
+      if (!response.ok) throw new Error('upload failed');
+      const attachment = await response.json();
+      if (!Array.isArray(node.attachments)) node.attachments = [];
+      node.attachments.push({ id: 'attachment-' + uid(), ...attachment });
+      node.updatedAt = new Date().toISOString();
+      idea.updatedAt = node.updatedAt;
+      saveData('截图已上传');
+      renderApp();
+      showToast('截图已添加到 ' + node.code);
+    } catch (error) {
+      if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
+      showToast('截图上传失败');
+    } finally {
+      input.value = '';
+    }
+  }
+
+  function deleteUploadedFile(url) {
+    if (!url || !url.startsWith('/uploads/')) return;
+    fetch('/api/uploads/' + encodeURIComponent(url.split('/').pop()), { method: 'DELETE' }).catch(() => {});
+  }
+
+  function removeProjectNodeAttachment(ideaId, nodeId, attachmentId) {
+    const idea = ideaById(ideaId);
+    const node = idea ? findProjectNode(idea, nodeId) : null;
+    if (!idea || !node || !Array.isArray(node.attachments)) return;
+    const attachment = node.attachments.find((item) => item.id === attachmentId);
+    node.attachments = node.attachments.filter((item) => item.id !== attachmentId);
+    deleteUploadedFile(attachment?.url);
+    node.updatedAt = new Date().toISOString();
+    idea.updatedAt = node.updatedAt;
+    saveData('已删除节点截图');
+    renderApp();
+  }
+
   function moveIdea(id, status) {
     const idea = ideaById(id);
     if (!idea) return;
@@ -662,6 +921,21 @@
       const type = action.dataset.action;
       if (type === 'capture') openCapture();
       if (type === 'open-idea') navigate('idea/' + encodeURIComponent(id));
+      if (type === 'toggle-node') {
+        if (projectUi.expandedNodes.has(action.dataset.nodeId)) projectUi.expandedNodes.delete(action.dataset.nodeId);
+        else projectUi.expandedNodes.add(action.dataset.nodeId);
+        renderApp();
+      }
+      if (type === 'add-root-node') addProjectNode(id, null);
+      if (type === 'add-child-node') addProjectNode(id, action.dataset.nodeId);
+      if (type === 'delete-node') deleteProjectNode(id, action.dataset.nodeId);
+      if (type === 'toggle-bulk-nodes') {
+        projectUi.bulkIdeaId = projectUi.bulkIdeaId === id ? null : id;
+        renderApp();
+        if (projectUi.bulkIdeaId) window.setTimeout(() => $('#bulkNodeInput')?.focus(), 0);
+      }
+      if (type === 'import-bulk-nodes') importBulkProjectNodes(id);
+      if (type === 'remove-node-attachment') removeProjectNodeAttachment(id, action.dataset.nodeId, action.dataset.attachmentId);
       if (type === 'status-menu') {
         const menu = action.parentElement.querySelector('.status-menu');
         const willOpen = menu.hidden;
@@ -730,6 +1004,14 @@
     });
 
     $('#pageContent').addEventListener('change', (event) => {
+      if (event.target.dataset.nodeField) {
+        updateProjectNodeField(event.target);
+        return;
+      }
+      if (event.target.matches('[data-node-upload]')) {
+        uploadProjectNodeImage(event.target);
+        return;
+      }
       if (event.target.id === 'sortSelect') state.sort = event.target.value;
       else if (event.target.id === 'tagSelect') state.tag = event.target.value;
       else return;

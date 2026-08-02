@@ -16,6 +16,7 @@
 | 容器端口 | `8080` |
 | 数据目录 | `/var/services/homes/deploy/project/idea-workbench/data` |
 | 状态文件 | `/var/services/homes/deploy/project/idea-workbench/data/state.json` |
+| 节点截图目录 | `/var/services/homes/deploy/project/idea-workbench/data/uploads` |
 | 公网域名 | `ideas.yangjunhu.com` |
 | 线上地址 | `https://ideas.yangjunhu.com/#/all` |
 | 健康检查 | `https://ideas.yangjunhu.com/healthz` |
@@ -69,7 +70,9 @@ sudo /usr/local/bin/docker-compose ps
 curl -fsS http://127.0.0.1:8184/healthz
 ```
 
-数据通过同源 API 写入 `data/state.json`。Compose 使用 `./data:/app/data` 挂载该目录，重建镜像或容器不会删除想法数据。
+数据通过同源 API 写入 `data/state.json`，节点截图写入 `data/uploads`。Compose 使用 `./data:/app/data` 挂载整个数据目录，重建镜像或容器不会删除想法数据与截图。
+
+备份时需要完整备份 `data` 目录。网页导出的 JSON 只包含截图地址，不包含图片二进制文件。
 
 当前版本暂不接入账号认证，公网域名上的 `/api/state` 具备读写权限，只适合个人或受信任环境。后续接入账号时，需要在 API 层校验当前用户，并将数据按用户隔离。
 
