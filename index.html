@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
     <script src="https://unpkg.com/lucide@latest"></script>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260802-nas" />
   </head>
   <body>
     <div class="app-shell">
@@ -70,7 +70,7 @@
 
         <div class="sidebar-spacer"></div>
         <div class="sidebar-footer">
-          <div class="privacy-note"><i data-lucide="shield-check"></i><span>只保存在这台设备</span></div>
+          <div class="privacy-note"><i data-lucide="database"></i><span>数据保存在 NAS</span></div>
           <div class="sidebar-actions">
             <button class="plain-action" id="exportData" type="button"><i data-lucide="download"></i>导出</button>
             <button class="plain-action" id="importDataButton" type="button"><i data-lucide="upload"></i>导入</button>
@@ -86,7 +86,7 @@
           </button>
           <div class="breadcrumb"><span>我的工作区</span><i data-lucide="chevron-right"></i><strong id="breadcrumbTitle">全部想法</strong></div>
           <div class="topbar-actions">
-            <div class="save-status"><span class="save-dot"></span><span id="saveStatus">已自动保存</span></div>
+            <div class="save-status"><span class="save-dot"></span><span id="saveStatus">连接 NAS 中...</span></div>
             <button class="icon-button" id="helpButton" type="button" data-tooltip="查看快捷键" aria-label="查看快捷键"><i data-lucide="circle-help"></i></button>
             <div class="avatar" aria-label="你的工作区">Y</div>
           </div>
@@ -129,6 +129,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js"></script>
+    <script src="app.js?v=20260802-nas"></script>
   </body>
 </html>

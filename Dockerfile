@@ -1,9 +1,14 @@
-FROM nginx:1.27-alpine
+FROM python:3.12-alpine
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY index.html styles.css app.js /usr/share/nginx/html/
+WORKDIR /app
 
-EXPOSE 80
+COPY index.html styles.css app.js server.py ./
+
+RUN mkdir -p /app/data
+
+EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- http://127.0.0.1/healthz || exit 1
+  CMD python3 -c "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8080/healthz').read() == b'ok'"
+
+CMD ["python3", "server.py"]

@@ -1,18 +1,20 @@
 # 想法台 · Idea Desk
 
-一个本地优先的个人想法工作台，用来接住灵感、筛选方向、记录最小实验，并把想法推进到完成。
+一个由 NAS 持久化的个人想法工作台，用来接住灵感、筛选方向、记录最小实验，并把想法推进到完成。
 
 线上地址：<https://ideas.yangjunhu.com/#/all>
 
 ## 打开
 
-不需要安装依赖。可以直接双击 `index.html`，也可以在项目目录运行：
+不需要安装第三方依赖。建议使用内置服务运行，因为它同时提供网页和数据 API：
 
 ```bash
-python3 -m http.server 8124
+python3 server.py
 ```
 
 然后访问 <http://localhost:8124/#/all>。
+
+只用 `python3 -m http.server` 也能查看静态页面，但不会提供数据 API，保存时会退回浏览器本地缓存。
 
 ## Docker 部署
 
@@ -21,6 +23,14 @@ docker compose up -d --build
 ```
 
 容器监听宿主机 `127.0.0.1:8184`，适合由 NAS 上的 Cloudflare Tunnel 或反向代理接入。健康检查地址是 `/healthz`。
+
+## 数据存储
+
+- 正常运行时，网页通过同源 `/api/state` API 将完整状态保存到 NAS 项目目录的 `data/state.json`。
+- Docker Compose 通过 `./data:/app/data` 持久化数据，重建容器不会删除数据。
+- 浏览器仍保留一份本地缓存，用于 NAS 暂时不可用时继续使用；NAS 恢复后下一次保存会重新同步。
+- 首次打开新部署时，如果 NAS 尚无状态文件，网页会自动把当前浏览器里的旧数据迁移到 NAS。
+- 当前版本没有账号和权限控制，知道域名的人可以读写这份数据，只适合个人或受信任环境；后续接入账号时需要同时保护 `/api/state`。
 
 NAS 账号、目录规范、凭据读取、部署命令和 Cloudflare Tunnel 配置见 [`docs/NAS_DEPLOYMENT.md`](docs/NAS_DEPLOYMENT.md)。这份文档可以作为其他项目部署到同一台 NAS 的参考。
 
@@ -32,7 +42,7 @@ NAS 账号、目录规范、凭据读取、部署命令和 Cloudflare Tunnel 配
 - 问题、目标用户、最小版本、下一步动作、完成线
 - 48 小时最小实验的目标、状态和结果记录
 - 搜索、标签筛选、排序、本周复盘视图
-- 浏览器本地自动保存，支持 JSON 导入和导出
+- NAS 自动保存，支持 JSON 导入和导出
 - 桌面端三栏布局和移动端菜单
 
-所有内容默认保存在当前浏览器的 `localStorage` 中，不会自动上传。
+数据的权威副本保存在 NAS；浏览器 `localStorage` 只作为离线兜底缓存。

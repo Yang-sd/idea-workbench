@@ -117,7 +117,7 @@
     ];
   }
 
-  function loadData() {
+  function loadLocalData() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return { ideas: seedIdeas(), focusId: 'idea-1', review: {} };
@@ -133,11 +133,52 @@
     }
   }
 
-  const stored = loadData();
+  function dataPayload(source) {
+    return {
+      version: 2,
+      ideas: source.ideas,
+      focusId: source.focusId,
+      review: source.review
+    };
+  }
+
+  async function writeRemoteData(payload) {
+    const response = await fetch('/api/state', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error('remote write failed');
+  }
+
+  async function loadData() {
+    const local = loadLocalData();
+    try {
+      const response = await fetch('/api/state', { cache: 'no-store' });
+      if (response.ok) {
+        const parsed = await response.json();
+        if (!parsed || !Array.isArray(parsed.ideas)) throw new Error('invalid remote state');
+        return {
+          ideas: parsed.ideas,
+          focusId: parsed.focusId || parsed.ideas.find((idea) => idea.status === 'try')?.id || null,
+          review: parsed.review || {},
+          persistence: 'nas'
+        };
+      }
+      if (response.status !== 404) throw new Error('remote read failed');
+      await writeRemoteData(dataPayload(local));
+      return { ...local, persistence: 'nas', migrated: true };
+    } catch (error) {
+      return { ...local, persistence: 'local' };
+    }
+  }
+
+  const initial = loadLocalData();
   const state = {
-    ideas: stored.ideas,
-    focusId: stored.focusId,
-    review: stored.review,
+    ideas: initial.ideas,
+    focusId: initial.focusId,
+    review: initial.review,
+    persistence: 'local',
     route: { page: 'all', id: null },
     query: '',
     tag: 'all',
@@ -161,18 +202,27 @@
     location.hash = target;
   }
 
+  let saveQueue = Promise.resolve();
+
   function saveData(message) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      ideas: state.ideas,
-      focusId: state.focusId,
-      review: state.review
-    }));
+    const payload = dataPayload(state);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     const status = $('#saveStatus');
-    if (status) status.textContent = message || '已自动保存';
+    if (status) status.textContent = message || (state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机');
     window.clearTimeout(saveData.timer);
     saveData.timer = window.setTimeout(() => {
-      if (status) status.textContent = '已自动保存';
+      if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
     }, 1800);
+    saveQueue = saveQueue.then(async () => {
+      try {
+        await writeRemoteData(payload);
+        state.persistence = 'nas';
+      } catch (error) {
+        state.persistence = 'local';
+        if (status) status.textContent = '仅保存在本机';
+        showToast('NAS 暂时不可用，已保存在本机');
+      }
+    });
   }
 
   function escapeHTML(value) {
@@ -742,8 +792,21 @@
     });
   }
 
+  async function initializeData() {
+    const stored = await loadData();
+    state.ideas = stored.ideas;
+    state.focusId = stored.focusId;
+    state.review = stored.review;
+    state.persistence = stored.persistence;
+    renderApp();
+    const status = $('#saveStatus');
+    if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
+    if (stored.migrated) showToast('本机数据已同步到 NAS');
+  }
+
   bindEvents();
   state.route = parseRoute();
   if (!location.hash) location.hash = '#/all';
   renderApp();
+  initializeData();
 })();

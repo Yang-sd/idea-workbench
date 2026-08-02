@@ -4,5 +4,9 @@ services:
       context: .
     container_name: idea-workbench
     restart: unless-stopped
+    environment:
+      PORT: "8080"
     ports:
-      - "127.0.0.1:8184:80"
+      - "127.0.0.1:8184:8080"
+    volumes:
+      - ./data:/app/data
