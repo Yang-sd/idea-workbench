@@ -366,13 +366,14 @@
     if (!Array.isArray(node.attachments)) node.attachments = [];
     if (!NODE_STATUS_LABELS[node.status]) node.status = 'not_started';
     const expanded = projectUi.expandedNodes.has(node.id);
+    const current = idea.currentNodeId === node.id;
     const statusOptions = Object.entries(NODE_STATUS_LABELS).map(([status, label]) =>
       '<option value="' + status + '"' + (node.status === status ? ' selected' : '') + '>' + label + '</option>'
     ).join('');
     const attachments = node.attachments.map((attachment) => projectNodeAttachmentMarkup(idea, node, attachment)).join('');
     const children = node.children.map((child) => projectNodeMarkup(idea, child)).join('');
-    return '<article class="project-node node-status-' + (node.status || 'not_started') + '" data-node-id="' + node.id + '" data-node-code="' + escapeHTML(node.code) + '">' +
-      '<div class="project-node-row"><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
+    return '<article class="project-node node-status-' + (node.status || 'not_started') + (current ? ' is-current' : '') + '" data-node-id="' + node.id + '" data-node-code="' + escapeHTML(node.code) + '">' +
+      '<div class="project-node-row"><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
       '<div class="project-node-expanded"' + (expanded ? '' : ' hidden') + '><div class="project-node-body"><label><span>节点记录</span><textarea data-node-field="content" data-id="' + idea.id + '" data-node-id="' + node.id + '" rows="3" placeholder="记录说明、执行结果、AI 处理备注等">' + escapeHTML(node.content || '') + '</textarea></label><div class="node-attachments"><div class="node-attachments-head"><span>截图与图片</span><label class="node-upload-button"><i data-lucide="image-plus"></i>添加截图<input data-node-upload data-id="' + idea.id + '" data-node-id="' + node.id + '" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label></div><div class="node-attachment-grid">' + (attachments || '<span class="node-attachment-empty">还没有截图</span>') + '</div></div></div>' +
       (children ? '<div class="project-node-children">' + children + '</div>' : '') + '</div></article>';
   }
@@ -386,6 +387,28 @@
       '<div class="project-node-summary"><div><strong>' + stats.completed + '</strong><span>/ ' + stats.total + ' 已完成</span></div><div class="node-progress-track"><span style="width:' + progress + '%"></span></div><span>' + stats.inProgress + ' 个进行中</span></div>' +
       '<div class="bulk-node-panel"' + (bulkOpen ? '' : ' hidden') + '><label for="bulkNodeInput">批量粘贴节点</label><p>每行一个节点；使用两个空格或 Tab 表示下一级。</p><textarea id="bulkNodeInput" rows="8" placeholder="产品范围\n  个人版页面\n    图片上传\n    图片预览\n  数据管理\n    删除与恢复"></textarea><div><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button">取消</button><button class="button compact-button primary-button" data-action="import-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="import"></i>导入节点</button></div></div>' +
       '<div class="project-tree">' + (nodes.length ? nodes.map((node) => projectNodeMarkup(idea, node)).join('') : '<div class="project-tree-empty"><i data-lucide="list-tree"></i><div><strong>还没有项目节点</strong><span>添加一个根节点，或一次粘贴完整的项目清单。</span></div></div>') + '</div></section>';
+  }
+
+  function flatProjectNodes(idea) {
+    const flattened = [];
+    function append(nodes, depth) {
+      (nodes || []).forEach((node) => {
+        flattened.push({ node, depth });
+        append(node.children, depth + 1);
+      });
+    }
+    append(projectNodesOf(idea), 0);
+    return flattened;
+  }
+
+  function executionWorkspaceMarkup(idea) {
+    const nodes = flatProjectNodes(idea);
+    const currentNode = findProjectNode(idea, idea.currentNodeId);
+    const nodeOptions = nodes.map(({ node, depth }) =>
+      '<option value="' + node.id + '"' + (idea.currentNodeId === node.id ? ' selected' : '') + '>' + '　'.repeat(depth) + escapeHTML(node.code + ' · ' + (node.title || '未命名节点')) + '</option>'
+    ).join('');
+    return '<section class="execution-workspace"><div class="editor-section-head execution-head"><span>02</span><div><h2>把它往前推一步</h2><p>当前行动、完成线和项目节点使用同一套执行结构。</p></div></div><div class="execution-fields"><div><label class="field-label" for="detailCurrentNode">当前执行节点</label><select class="text-input" id="detailCurrentNode" name="currentNodeId"' + (nodes.length ? '' : ' disabled') + '><option value="">' + (nodes.length ? '暂不指定' : '请先添加项目节点') + '</option>' + nodeOptions + '</select></div><div><label class="field-label" for="detailNextAction">下一步动作</label><input class="text-input input-large" id="detailNextAction" name="nextAction" value="' + escapeHTML(idea.nextAction) + '" placeholder="选择节点后自动生成，也可以补充说明" /></div><div><label class="field-label" for="detailFinishLine">完成线</label><textarea class="text-input" id="detailFinishLine" name="finishLine" rows="2">' + escapeHTML(idea.finishLine) + '</textarea></div></div>' +
+      (currentNode ? '<div class="current-node-strip"><span class="node-code">' + escapeHTML(currentNode.code) + '</span><strong>' + escapeHTML(currentNode.title) + '</strong><span class="node-status-text ' + currentNode.status + '">' + NODE_STATUS_LABELS[currentNode.status || 'not_started'] + '</span></div>' : '') + projectTreeMarkup(idea) + '</section>';
   }
 
   function tagsMarkup(tags) {
@@ -539,13 +562,12 @@
     const isFocused = state.focusId === idea.id && idea.status === 'try';
     return '<a class="back-link" href="#/' + idea.status + '"><i data-lucide="arrow-left"></i>返回' + STATUS_LABELS[idea.status] + '</a>' +
       '<section class="detail-page-head"><div><div class="detail-page-meta">' + statusPill(idea) + '<span>更新于 ' + formatRelative(idea.updatedAt) + '</span></div><h1>' + escapeHTML(idea.title) + '</h1><p>在一个页面里完成判断、计划和实验记录。</p></div><button class="icon-button danger-icon" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="删除这个想法"><i data-lucide="trash-2"></i></button></section>' +
-      projectTreeMarkup(idea) +
-      '<form class="editor-layout" id="detailForm" data-id="' + idea.id + '"><div class="editor-main">' +
+      '<form id="detailForm" data-id="' + idea.id + '"><div class="editor-layout"><div class="editor-main">' +
       '<section class="editor-section"><div class="editor-section-head"><span>01</span><div><h2>想法本身</h2><p>先说清楚问题和最小版本。</p></div></div><div class="field-group"><label class="field-label" for="detailTitle">想法标题 <span>*</span></label><input class="text-input input-large" id="detailTitle" name="title" value="' + escapeHTML(idea.title) + '" maxlength="80" required /></div><div class="field-group"><label class="field-label" for="detailProblem">它在解决什么问题</label><textarea class="text-input" id="detailProblem" name="problem" rows="4">' + escapeHTML(idea.problem) + '</textarea></div><div class="form-row"><div><label class="field-label" for="detailAudience">可能会需要的人</label><textarea class="text-input" id="detailAudience" name="audience" rows="3">' + escapeHTML(idea.audience) + '</textarea></div><div><label class="field-label" for="detailMvp">我能做出的最小版本</label><textarea class="text-input" id="detailMvp" name="mvp" rows="3">' + escapeHTML(idea.mvp) + '</textarea></div></div></section>' +
-      '<section class="editor-section"><div class="editor-section-head"><span>02</span><div><h2>把它往前推一步</h2><p>下一步应该能在 30 分钟内开始。</p></div></div><div class="field-group"><label class="field-label" for="detailNextAction">下一步动作</label><input class="text-input input-large" id="detailNextAction" name="nextAction" value="' + escapeHTML(idea.nextAction) + '" placeholder="一个具体动作（可选）" /></div><div class="field-group"><label class="field-label" for="detailFinishLine">完成线</label><textarea class="text-input" id="detailFinishLine" name="finishLine" rows="3">' + escapeHTML(idea.finishLine) + '</textarea></div></section></div>' +
+      '</div>' +
       '<aside class="editor-rail"><section class="rail-section"><div class="editor-section-head"><span>03</span><div><h2>投入判断</h2><p>用同一把尺子比较想法。</p></div></div><div class="score-grid"><div class="score-field"><label for="interestRange">兴趣 <output id="interestOutput">' + idea.interest + '</output>/5</label><input id="interestRange" name="interest" type="range" min="1" max="5" value="' + idea.interest + '" /></div><div class="score-field"><label for="valueRange">价值 <output id="valueOutput">' + idea.value + '</output>/5</label><input id="valueRange" name="value" type="range" min="1" max="5" value="' + idea.value + '" /></div><div class="score-field"><label for="easeRange">易验证 <output id="easeOutput">' + idea.ease + '</output>/5</label><input id="easeRange" name="ease" type="range" min="1" max="5" value="' + idea.ease + '" /></div></div><div class="score-total"><span>验证优先级</span><strong id="detailScore">' + scoreOf(idea) + '<small>/10</small></strong></div></section>' +
       '<section class="rail-section experiment-box"><div class="editor-section-head"><span>04</span><div><h2>48 小时实验</h2><p>先证明它值得继续。</p></div></div><div class="field-group"><label class="field-label" for="experimentGoal">我要验证什么</label><textarea class="text-input" id="experimentGoal" name="experimentGoal" rows="3">' + escapeHTML(idea.experimentGoal) + '</textarea></div><div class="field-group"><label class="field-label" for="experimentResult">结果记录</label><textarea class="text-input" id="experimentResult" name="experimentResult" rows="3">' + escapeHTML(idea.experimentResult) + '</textarea></div><label class="field-label" for="experimentStatus">实验状态</label><select class="text-input" id="experimentStatus" name="experimentStatus"><option value="not_started"' + (idea.experimentStatus === 'not_started' ? ' selected' : '') + '>还没开始</option><option value="in_progress"' + (idea.experimentStatus === 'in_progress' ? ' selected' : '') + '>进行中</option><option value="completed"' + (idea.experimentStatus === 'completed' ? ' selected' : '') + '>已完成</option></select></section>' +
-      '<section class="rail-section"><div class="form-row"><div><label class="field-label" for="detailStatus">所在页面</label><select class="text-input" id="detailStatus" name="status"><option value="inbox"' + (idea.status === 'inbox' ? ' selected' : '') + '>收件箱</option><option value="try"' + (idea.status === 'try' ? ' selected' : '') + '>准备尝试</option><option value="later"' + (idea.status === 'later' ? ' selected' : '') + '>以后再说</option><option value="done"' + (idea.status === 'done' ? ' selected' : '') + '>已完成</option></select></div><div><label class="field-label" for="detailTags">标签</label><input class="text-input" id="detailTags" name="tags" value="' + escapeHTML(idea.tags.join(', ')) + '" /></div></div><div class="editor-actions"><button class="button primary-button" type="submit"><i data-lucide="save"></i>保存修改</button>' + (idea.status === 'try' ? '<button class="button ghost-button" data-action="focus" data-id="' + idea.id + '" type="button"><i data-lucide="target"></i>' + (isFocused ? '取消专注' : '设为专注') + '</button>' : '') + (idea.status === 'done' ? '<button class="button ghost-button" data-action="move" data-status="try" data-id="' + idea.id + '" type="button">重新打开</button>' : '<button class="button ghost-button" data-action="done" data-id="' + idea.id + '" type="button"><i data-lucide="check"></i>标记完成</button>') + '</div></section></aside></form>';
+      '<section class="rail-section"><div class="form-row"><div><label class="field-label" for="detailStatus">所在页面</label><select class="text-input" id="detailStatus" name="status"><option value="inbox"' + (idea.status === 'inbox' ? ' selected' : '') + '>收件箱</option><option value="try"' + (idea.status === 'try' ? ' selected' : '') + '>准备尝试</option><option value="later"' + (idea.status === 'later' ? ' selected' : '') + '>以后再说</option><option value="done"' + (idea.status === 'done' ? ' selected' : '') + '>已完成</option></select></div><div><label class="field-label" for="detailTags">标签</label><input class="text-input" id="detailTags" name="tags" value="' + escapeHTML(idea.tags.join(', ')) + '" /></div></div><div class="editor-actions"><button class="button primary-button" type="submit"><i data-lucide="save"></i>保存修改</button>' + (idea.status === 'try' ? '<button class="button ghost-button" data-action="focus" data-id="' + idea.id + '" type="button"><i data-lucide="target"></i>' + (isFocused ? '取消专注' : '设为专注') + '</button>' : '') + (idea.status === 'done' ? '<button class="button ghost-button" data-action="move" data-status="try" data-id="' + idea.id + '" type="button">重新打开</button>' : '<button class="button ghost-button" data-action="done" data-id="' + idea.id + '" type="button"><i data-lucide="check"></i>标记完成</button>') + '</div></section></aside></div>' + executionWorkspaceMarkup(idea) + '</form>';
   }
 
   function renderNavigation() {
@@ -653,6 +675,8 @@
     idea.mvp = String(formData.get('mvp') || '').trim();
     idea.nextAction = String(formData.get('nextAction') || '').trim();
     idea.finishLine = String(formData.get('finishLine') || '').trim();
+    const currentNodeId = String(formData.get('currentNodeId') || '');
+    idea.currentNodeId = findProjectNode(idea, currentNodeId) ? currentNodeId : null;
     idea.status = String(formData.get('status') || 'inbox');
     idea.tags = String(formData.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, 8);
     idea.interest = Number(formData.get('interest')) || 1;
@@ -690,6 +714,19 @@
     window.setTimeout(() => $('[data-node-id="' + node.id + '"] .node-title-input')?.focus(), 0);
   }
 
+  function setCurrentProjectNode(ideaId, nodeId) {
+    const idea = ideaById(ideaId);
+    const node = idea ? findProjectNode(idea, nodeId) : null;
+    if (!idea || !node) return;
+    const willClear = idea.currentNodeId === node.id;
+    idea.currentNodeId = willClear ? null : node.id;
+    if (!willClear) idea.nextAction = '执行 ' + node.code + '：' + node.title;
+    idea.updatedAt = new Date().toISOString();
+    saveData(willClear ? '已取消当前执行节点' : '已设置当前执行节点');
+    renderApp();
+    showToast(willClear ? '已取消当前执行节点' : node.code + ' 已设为下一步');
+  }
+
   function deleteProjectNode(ideaId, nodeId) {
     const idea = ideaById(ideaId);
     const node = idea ? findProjectNode(idea, nodeId) : null;
@@ -699,10 +736,13 @@
     if (!window.confirm('确定删除 ' + node.code + ' 以及它的 ' + (nodeCount - 1) + ' 个子节点吗？')) return;
     const removed = removeProjectNode(projectNodesOf(idea), nodeId);
     if (!removed) return;
+    let removedCurrentNode = false;
     walkProjectNodes([removed], (item) => {
+      if (idea.currentNodeId === item.id) removedCurrentNode = true;
       (item.attachments || []).forEach((attachment) => deleteUploadedFile(attachment.url));
       projectUi.expandedNodes.delete(item.id);
     });
+    if (removedCurrentNode) idea.currentNodeId = null;
     idea.updatedAt = new Date().toISOString();
     saveData('已删除项目节点');
     renderApp();
@@ -762,6 +802,11 @@
     const field = input.dataset.nodeField;
     if (field === 'status' && !NODE_STATUS_LABELS[input.value]) return;
     node[field] = field === 'title' ? input.value.trim() || '未命名节点' : input.value.trim();
+    if (field === 'title' && idea.currentNodeId === node.id) {
+      idea.nextAction = '执行 ' + node.code + '：' + node.title;
+      const nextActionInput = $('#detailNextAction');
+      if (nextActionInput) nextActionInput.value = idea.nextAction;
+    }
     node.updatedAt = new Date().toISOString();
     idea.updatedAt = node.updatedAt;
     saveData('已保存 ' + node.code);
@@ -928,6 +973,7 @@
       }
       if (type === 'add-root-node') addProjectNode(id, null);
       if (type === 'add-child-node') addProjectNode(id, action.dataset.nodeId);
+      if (type === 'set-current-node') setCurrentProjectNode(id, action.dataset.nodeId);
       if (type === 'delete-node') deleteProjectNode(id, action.dataset.nodeId);
       if (type === 'toggle-bulk-nodes') {
         projectUi.bulkIdeaId = projectUi.bulkIdeaId === id ? null : id;
@@ -1004,6 +1050,13 @@
     });
 
     $('#pageContent').addEventListener('change', (event) => {
+      if (event.target.id === 'detailCurrentNode') {
+        const idea = ideaById(event.target.closest('form')?.dataset.id);
+        const node = idea ? findProjectNode(idea, event.target.value) : null;
+        const nextActionInput = $('#detailNextAction');
+        if (nextActionInput) nextActionInput.value = node ? '执行 ' + node.code + '：' + node.title : '';
+        return;
+      }
       if (event.target.dataset.nodeField) {
         updateProjectNodeField(event.target);
         return;
@@ -1089,6 +1142,7 @@
   bindEvents();
   state.route = parseRoute();
   if (!location.hash) location.hash = '#/all';
-  renderApp();
+  $('#pageContent').innerHTML = '<div class="page-loading"><i data-lucide="database"></i><span>正在读取 NAS 数据...</span></div>';
+  renderIcons();
   initializeData();
 })();
