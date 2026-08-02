@@ -195,6 +195,18 @@
     return new Date(iso).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
   }
 
+  function formatTimestamp(iso) {
+    const date = new Date(iso);
+    if (!Number.isFinite(date.getTime())) return '时间未知';
+    return date.toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+  }
+
   function parkedDays(iso) {
     return Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000));
   }
@@ -254,7 +266,7 @@
       '<span class="row-accent ' + idea.status + '"></span>' +
       '<div class="row-main"><div class="row-title-line"><h3 class="row-title">' + escapeHTML(idea.title) + '</h3>' + statusPill(idea) + '</div>' +
       '<p class="row-description">' + escapeHTML(idea.problem || '还没有补充它想解决的问题') + '</p>' +
-      '<div class="row-bottom">' + tagsMarkup(idea.tags) + (idea.nextAction ? '<span class="row-next"><i data-lucide="arrow-right"></i>' + escapeHTML(idea.nextAction) + '</span>' : '') + '</div></div>' +
+      '<div class="row-bottom">' + tagsMarkup(idea.tags) + (idea.nextAction ? '<span class="row-next"><i data-lucide="arrow-right"></i>' + escapeHTML(idea.nextAction) + '</span>' : '') + '<span class="row-updated"><i data-lucide="clock-3"></i>更新于 ' + formatTimestamp(idea.updatedAt) + '</span></div></div>' +
       '<div class="row-tools">' + statusMenuMarkup(idea) + '<button class="quick-delete" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="快速删除：' + escapeHTML(idea.title) + '" data-tooltip="快速删除"><i data-lucide="trash-2"></i></button><div class="row-score"><span class="score-label">验证优先级</span><span class="score-value">' + scoreOf(idea) + '<small>/10</small></span></div></div></article>';
   }
 
@@ -293,7 +305,7 @@
       '<a href="#/done"><span>已完成</span><strong>' + statusCount('done') + '</strong></a></section>' +
       (focus ? '<section class="focus-ribbon"><div class="focus-ribbon-label"><i data-lucide="target"></i><span>当前专注</span></div><div class="focus-ribbon-main"><strong>' + escapeHTML(focus.title) + '</strong><span>' + escapeHTML(focus.nextAction || '补充下一步动作') + '</span></div><button class="mini-button" data-action="open-idea" data-id="' + focus.id + '" type="button">继续推进<i data-lucide="arrow-right"></i></button></section>' : '') +
       '<section class="route-section"><div class="section-heading"><div><h2>想法索引</h2><p>搜索、筛选并比较所有记录。</p></div><span class="title-count">' + state.ideas.length + '</span></div>' +
-      '<div class="toolbar"><label class="search-box" for="searchInput"><i data-lucide="search"></i><input id="searchInput" type="search" value="' + escapeHTML(state.query) + '" placeholder="搜索标题、问题或标签" autocomplete="off" /><kbd>/</kbd></label><div class="toolbar-selects">' +
+      '<div class="toolbar"><label class="search-box" for="searchInput"><i data-lucide="search"></i><input id="searchInput" type="search" value="' + escapeHTML(state.query) + '" placeholder="搜索标题、问题或标签" autocomplete="off" /></label><div class="toolbar-selects">' +
       '<label class="select-label" for="sortSelect"><span>排序</span><select id="sortSelect"><option value="updated"' + (state.sort === 'updated' ? ' selected' : '') + '>最近更新</option><option value="score"' + (state.sort === 'score' ? ' selected' : '') + '>优先验证</option><option value="created"' + (state.sort === 'created' ? ' selected' : '') + '>最近记录</option><option value="title"' + (state.sort === 'title' ? ' selected' : '') + '>按名称</option></select></label>' +
       '<label class="select-label" for="tagSelect"><span>标签</span><select id="tagSelect"><option value="all">全部</option>' + tags.map((tag) => '<option value="' + escapeHTML(tag) + '"' + (state.tag === tag ? ' selected' : '') + '>' + escapeHTML(tag) + '</option>').join('') + '</select></label></div></div>' +
       '<div id="allResults">' + allResultsMarkup() + '</div></section>';
