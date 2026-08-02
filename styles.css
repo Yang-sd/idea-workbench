@@ -816,6 +816,10 @@ select.text-input { cursor: pointer; }
 
 [data-tooltip]:hover::after, [data-tooltip]:focus-visible::after { opacity: 1; transform: translateY(0); }
 
+.topbar [data-tooltip]::after { top: calc(100% + 8px); bottom: auto; transform: translateY(-3px); }
+
+.topbar [data-tooltip]:hover::after, .topbar [data-tooltip]:focus-visible::after { transform: translateY(0); }
+
 @media (min-width: 1011px) {
   body { overflow: hidden; }
   .app-shell { height: 100vh; min-height: 0; overflow: hidden; }
