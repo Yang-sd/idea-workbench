@@ -334,13 +334,39 @@ h2 { margin-bottom: 7px; font-size: 20px; font-weight: 500; line-height: 1.3; }
 
 .row-tools { display: flex; align-items: center; gap: 12px; }
 
-.quick-delete { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; color: var(--muted-2); background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer; opacity: 0; transform: translateX(4px); transition: color .16s ease, background .16s ease, border-color .16s ease, opacity .16s ease, transform .16s ease; }
+.status-menu-wrap { position: relative; }
 
-.quick-delete svg { width: 15px; height: 15px; }
+.quick-status, .quick-delete { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; color: var(--muted-2); background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer; opacity: 0; transform: translateX(4px); transition: color .16s ease, background .16s ease, border-color .16s ease, opacity .16s ease, transform .16s ease; }
 
-.idea-row:hover .quick-delete, .idea-row:focus-within .quick-delete { opacity: 1; transform: translateX(0); }
+.quick-status svg, .quick-delete svg { width: 15px; height: 15px; }
+
+.idea-row:hover .quick-status, .idea-row:focus-within .quick-status, .idea-row:hover .quick-delete, .idea-row:focus-within .quick-delete { opacity: 1; transform: translateX(0); }
+
+.quick-status:hover { color: var(--blue); background: var(--blue-soft); border-color: #cdd9f7; }
 
 .quick-delete:hover { color: #b34136; background: #fff1ef; border-color: #f0cbc6; }
+
+.status-menu { position: absolute; top: calc(100% + 7px); right: 0; z-index: 5; width: 145px; padding: 7px; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow-small); }
+
+.status-menu[hidden] { display: none; }
+
+.status-menu-title { display: block; padding: 3px 8px 6px; color: var(--muted-2); font-size: 9px; }
+
+.status-menu-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px; padding: 0 8px; color: var(--muted); background: transparent; border: 0; border-radius: 6px; font-size: 10px; text-align: left; cursor: pointer; }
+
+.status-menu-option:hover, .status-menu-option.is-current { color: var(--ink); background: var(--paper-soft); }
+
+.status-menu-option svg { width: 13px; height: 13px; margin-left: auto; color: var(--green); }
+
+.status-menu-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+.status-menu-dot.inbox { background: var(--yellow); }
+
+.status-menu-dot.try { background: var(--blue); }
+
+.status-menu-dot.later { background: var(--violet); }
+
+.status-menu-dot.done { background: var(--green); }
 
 .score-label { color: var(--muted-2); font-size: 9px; }
 
@@ -854,7 +880,7 @@ select.text-input { cursor: pointer; }
   .idea-row { grid-template-columns: 5px minmax(0, 1fr) auto; gap: 10px; padding-right: 11px; }
   .row-score { min-width: 45px; }
   .row-tools { gap: 5px; }
-  .quick-delete { width: 30px; height: 30px; opacity: 1; transform: none; }
+  .quick-status, .quick-delete { width: 30px; height: 30px; opacity: 1; transform: none; }
   .row-score .score-label { display: none; }
   .row-title-line .status-pill { display: none; }
   .row-description { max-width: 100%; }

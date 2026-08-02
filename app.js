@@ -234,6 +234,13 @@
     return '<span class="status-pill ' + idea.status + '">' + STATUS_LABELS[idea.status] + '</span>';
   }
 
+  function statusMenuMarkup(idea) {
+    const options = Object.entries(STATUS_LABELS).map(([status, label]) =>
+      '<button class="status-menu-option ' + (idea.status === status ? 'is-current' : '') + '" data-action="move" data-status="' + status + '" data-id="' + idea.id + '" type="button" role="menuitem"><span class="status-menu-dot ' + status + '"></span>' + label + (idea.status === status ? '<i data-lucide="check"></i>' : '') + '</button>'
+    ).join('');
+    return '<div class="status-menu-wrap"><button class="quick-status" data-action="status-menu" data-id="' + idea.id + '" type="button" aria-label="快速修改状态：' + escapeHTML(idea.title) + '" aria-expanded="false" data-tooltip="快速改状态"><i data-lucide="arrow-right-left"></i></button><div class="status-menu" role="menu" hidden><span class="status-menu-title">移动到</span>' + options + '</div></div>';
+  }
+
   function emptyState(icon, title, copy, action) {
     return '<div class="empty-list"><div class="empty-list-icon"><i data-lucide="' + icon + '"></i></div><strong>' + title + '</strong><p>' + copy + '</p>' + (action || '') + '</div>';
   }
@@ -248,7 +255,7 @@
       '<div class="row-main"><div class="row-title-line"><h3 class="row-title">' + escapeHTML(idea.title) + '</h3>' + statusPill(idea) + '</div>' +
       '<p class="row-description">' + escapeHTML(idea.problem || '还没有补充它想解决的问题') + '</p>' +
       '<div class="row-bottom">' + tagsMarkup(idea.tags) + (idea.nextAction ? '<span class="row-next"><i data-lucide="arrow-right"></i>' + escapeHTML(idea.nextAction) + '</span>' : '') + '</div></div>' +
-      '<div class="row-tools"><button class="quick-delete" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="快速删除：' + escapeHTML(idea.title) + '" data-tooltip="快速删除"><i data-lucide="trash-2"></i></button><div class="row-score"><span class="score-label">验证优先级</span><span class="score-value">' + scoreOf(idea) + '<small>/10</small></span></div></div></article>';
+      '<div class="row-tools">' + statusMenuMarkup(idea) + '<button class="quick-delete" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="快速删除：' + escapeHTML(idea.title) + '" data-tooltip="快速删除"><i data-lucide="trash-2"></i></button><div class="row-score"><span class="score-label">验证优先级</span><span class="score-value">' + scoreOf(idea) + '<small>/10</small></span></div></div></article>';
   }
 
   function filteredAllIdeas() {
@@ -593,6 +600,14 @@
       const type = action.dataset.action;
       if (type === 'capture') openCapture();
       if (type === 'open-idea') navigate('idea/' + encodeURIComponent(id));
+      if (type === 'status-menu') {
+        const menu = action.parentElement.querySelector('.status-menu');
+        const willOpen = menu.hidden;
+        $$('.status-menu').forEach((item) => { item.hidden = true; });
+        $$('.quick-status').forEach((item) => { item.setAttribute('aria-expanded', 'false'); });
+        menu.hidden = !willOpen;
+        action.setAttribute('aria-expanded', String(willOpen));
+      }
       if (type === 'move') moveIdea(id, action.dataset.status);
       if (type === 'done') markDone(id);
       if (type === 'focus') toggleFocus(id);
