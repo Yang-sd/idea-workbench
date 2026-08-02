@@ -3,9 +3,10 @@ import os
 import re
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -13,14 +14,33 @@ DATA_DIR = Path(os.environ.get('DATA_DIR', ROOT / 'data'))
 STATE_PATH = DATA_DIR / 'state.json'
 UPLOAD_DIR = DATA_DIR / 'uploads'
 MAX_BODY_BYTES = 4 * 1024 * 1024
-MAX_UPLOAD_BYTES = 12 * 1024 * 1024
-IMAGE_TYPES = {
-    'image/png': 'png',
-    'image/jpeg': 'jpg',
-    'image/gif': 'gif',
-    'image/webp': 'webp'
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+UPLOAD_TYPES = {
+    'png': ('image/png', {'image/png'}),
+    'jpg': ('image/jpeg', {'image/jpeg'}),
+    'gif': ('image/gif', {'image/gif'}),
+    'webp': ('image/webp', {'image/webp'}),
+    'pdf': ('application/pdf', {'application/pdf'}),
+    'txt': ('text/plain; charset=utf-8', {'text/plain'}),
+    'md': ('text/markdown; charset=utf-8', {'text/markdown', 'text/plain'}),
+    'csv': ('text/csv; charset=utf-8', {'text/csv', 'text/plain', 'application/vnd.ms-excel'}),
+    'json': ('application/json; charset=utf-8', {'application/json', 'text/plain'}),
+    'doc': ('application/msword', {'application/msword'}),
+    'docx': ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', {
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    }),
+    'xls': ('application/vnd.ms-excel', {'application/vnd.ms-excel'}),
+    'xlsx': ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', {
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    }),
+    'ppt': ('application/vnd.ms-powerpoint', {'application/vnd.ms-powerpoint'}),
+    'pptx': ('application/vnd.openxmlformats-officedocument.presentationml.presentation', {
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    }),
+    'zip': ('application/zip', {'application/zip', 'application/x-zip-compressed'})
 }
-UPLOAD_NAME_PATTERN = re.compile(r'^[0-9a-f]{32}\.(png|jpg|gif|webp)$')
+UPLOAD_NAME_PATTERN = re.compile(r'^[0-9a-f]{32}\.(' + '|'.join(UPLOAD_TYPES) + r')$')
+NODE_STATUSES = {'not_started', 'in_progress', 'completed'}
 
 
 def read_state():
@@ -42,6 +62,35 @@ def write_state(payload):
     finally:
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def find_node(nodes, node_id):
+    for node in nodes if isinstance(nodes, list) else []:
+        if node.get('id') == node_id:
+            return node
+        match = find_node(node.get('children'), node_id)
+        if match:
+            return match
+    return None
+
+
+def node_progress(nodes):
+    progress = {'total': 0, 'completed': 0, 'inProgress': 0}
+    for node in nodes if isinstance(nodes, list) else []:
+        progress['total'] += 1
+        if node.get('status') == 'completed':
+            progress['completed'] += 1
+        if node.get('status') == 'in_progress':
+            progress['inProgress'] += 1
+        child_progress = node_progress(node.get('children'))
+        for key in progress:
+            progress[key] += child_progress[key]
+    progress['percent'] = round(progress['completed'] / progress['total'] * 100) if progress['total'] else 0
+    return progress
 
 
 class IdeaDeskHandler(SimpleHTTPRequestHandler):
@@ -66,9 +115,12 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded_body)
 
-    def send_binary(self, status_code, body, content_type):
+    def send_binary(self, status_code, body, content_type, filename=None):
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        if filename:
+            self.send_header('Content-Disposition', 'inline; filename="%s"' % filename)
         self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
@@ -76,6 +128,11 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
 
     def request_path(self):
         return urlparse(self.path).path
+
+    def absolute_url(self, path):
+        protocol = self.headers.get('X-Forwarded-Proto', 'http').split(',', 1)[0].strip()
+        host = self.headers.get('Host', 'localhost')
+        return '%s://%s%s' % (protocol, host, path)
 
     def end_headers(self):
         path = self.request_path()
@@ -97,6 +154,53 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
             except (OSError, json.JSONDecodeError):
                 self.send_json(500, {'error': 'state_unreadable'})
             return
+        context_match = re.fullmatch(r'/api/ideas/([^/]+)/context', path)
+        if context_match:
+            try:
+                state = read_state()
+            except (OSError, json.JSONDecodeError):
+                self.send_json(500, {'error': 'state_unreadable'})
+                return
+            idea_id = unquote(context_match.group(1))
+            idea = next((item for item in state.get('ideas', []) if item.get('id') == idea_id), None)
+            if not idea:
+                self.send_json(404, {'error': 'idea_not_found'})
+                return
+            project_files = []
+            for item in idea.get('files', []) if isinstance(idea.get('files'), list) else []:
+                project_files.append({**item, 'downloadUrl': self.absolute_url(item.get('url', ''))})
+            node_files = []
+
+            def collect_node_files(nodes):
+                for node in nodes if isinstance(nodes, list) else []:
+                    for item in node.get('attachments', []) if isinstance(node.get('attachments'), list) else []:
+                        node_files.append({
+                            **item,
+                            'nodeId': node.get('id'),
+                            'nodeCode': node.get('code'),
+                            'nodeTitle': node.get('title'),
+                            'downloadUrl': self.absolute_url(item.get('url', ''))
+                        })
+                    collect_node_files(node.get('children'))
+
+            collect_node_files(idea.get('nodes'))
+            encoded_idea_id = quote(idea_id, safe='')
+            self.send_json(200, {
+                'version': 1,
+                'generatedAt': utc_now(),
+                'projectPageUrl': self.absolute_url('/#/idea/' + encoded_idea_id),
+                'idea': idea,
+                'progress': node_progress(idea.get('nodes')),
+                'projectFiles': project_files,
+                'nodeFiles': node_files,
+                'progressUpdate': {
+                    'method': 'PATCH',
+                    'endpointTemplate': self.absolute_url('/api/ideas/' + encoded_idea_id + '/nodes/{nodeId}'),
+                    'fields': ['status', 'content'],
+                    'statuses': sorted(NODE_STATUSES)
+                }
+            })
+            return
         if path.startswith('/uploads/'):
             filename = path.removeprefix('/uploads/')
             if not UPLOAD_NAME_PATTERN.fullmatch(filename):
@@ -107,9 +211,9 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
                 self.send_json(404, {'error': 'upload_not_found'})
                 return
             extension = filename.rsplit('.', 1)[-1]
-            content_type = {'png': 'image/png', 'jpg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp'}[extension]
+            content_type = UPLOAD_TYPES[extension][0]
             try:
-                self.send_binary(200, upload_path.read_bytes(), content_type)
+                self.send_binary(200, upload_path.read_bytes(), content_type, filename)
             except OSError:
                 self.send_json(500, {'error': 'upload_unreadable'})
             return
@@ -122,9 +226,13 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
             return
 
         content_type = self.headers.get('Content-Type', '').split(';', 1)[0].strip().lower()
-        extension = IMAGE_TYPES.get(content_type)
-        if not extension:
-            self.send_json(415, {'error': 'unsupported_image_type'})
+        original_name = Path(parse_qs(parsed_url.query).get('name', ['file'])[-1]).name[:160]
+        extension = Path(original_name).suffix.lower().removeprefix('.')
+        if extension == 'jpeg':
+            extension = 'jpg'
+        upload_type = UPLOAD_TYPES.get(extension)
+        if not upload_type or (content_type not in upload_type[1] and content_type != 'application/octet-stream'):
+            self.send_json(415, {'error': 'unsupported_file_type'})
             return
         try:
             content_length = int(self.headers.get('Content-Length', '0'))
@@ -144,8 +252,13 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
         except OSError:
             self.send_json(500, {'error': 'upload_unwritable'})
             return
-        original_name = parse_qs(parsed_url.query).get('name', ['截图'])[-1][:160]
-        self.send_json(201, {'url': '/uploads/' + filename, 'name': original_name, 'type': content_type})
+        self.send_json(201, {
+            'url': '/uploads/' + filename,
+            'name': original_name,
+            'type': upload_type[0].split(';', 1)[0],
+            'size': content_length,
+            'uploadedAt': utc_now()
+        })
 
     def do_PUT(self):
         if self.request_path() != '/api/state':
@@ -182,6 +295,61 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
             self.send_json(500, {'error': 'state_unwritable'})
             return
         self.send_json(200, {'ok': True})
+
+    def do_PATCH(self):
+        match = re.fullmatch(r'/api/ideas/([^/]+)/nodes/([^/]+)', self.request_path())
+        if not match:
+            self.send_json(404, {'error': 'not_found'})
+            return
+        try:
+            content_length = int(self.headers.get('Content-Length', '0'))
+        except ValueError:
+            self.send_json(400, {'error': 'invalid_content_length'})
+            return
+        if content_length <= 0 or content_length > 64 * 1024:
+            self.send_json(413, {'error': 'payload_too_large'})
+            return
+        try:
+            payload = json.loads(self.rfile.read(content_length).decode('utf-8'))
+            state = read_state()
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self.send_json(400, {'error': 'invalid_json'})
+            return
+        except OSError:
+            self.send_json(500, {'error': 'state_unreadable'})
+            return
+        idea_id = unquote(match.group(1))
+        node_id = unquote(match.group(2))
+        idea = next((item for item in state.get('ideas', []) if item.get('id') == idea_id), None)
+        node = find_node(idea.get('nodes'), node_id) if idea else None
+        if not idea or not node:
+            self.send_json(404, {'error': 'node_not_found'})
+            return
+        changed = False
+        if 'status' in payload:
+            if payload['status'] not in NODE_STATUSES:
+                self.send_json(400, {'error': 'invalid_node_status'})
+                return
+            node['status'] = payload['status']
+            changed = True
+        if 'content' in payload:
+            if not isinstance(payload['content'], str) or len(payload['content']) > 20000:
+                self.send_json(400, {'error': 'invalid_node_content'})
+                return
+            node['content'] = payload['content'].strip()
+            changed = True
+        if not changed:
+            self.send_json(400, {'error': 'no_supported_fields'})
+            return
+        now = utc_now()
+        node['updatedAt'] = now
+        idea['updatedAt'] = now
+        try:
+            write_state(state)
+        except OSError:
+            self.send_json(500, {'error': 'state_unwritable'})
+            return
+        self.send_json(200, {'ok': True, 'node': node, 'progress': node_progress(idea.get('nodes'))})
 
     def do_DELETE(self):
         path = self.request_path()

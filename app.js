@@ -6,6 +6,8 @@
   const STATUS_LABELS = { inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成' };
   const EXPERIMENT_LABELS = { not_started: '还没开始', in_progress: '进行中', completed: '已完成' };
   const NODE_STATUS_LABELS = { not_started: '未开始', in_progress: '进行中', completed: '已完成' };
+  const PROJECT_FILE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'txt', 'md', 'csv', 'json', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'zip']);
+  const MAX_PROJECT_FILE_BYTES = 50 * 1024 * 1024;
   const $ = (selector, parent) => (parent || document).querySelector(selector);
   const $$ = (selector, parent) => Array.from((parent || document).querySelectorAll(selector));
 
@@ -136,7 +138,7 @@
 
   function dataPayload(source) {
     return {
-      version: 2,
+      version: 3,
       ideas: source.ideas,
       focusId: source.focusId,
       review: source.review
@@ -297,6 +299,45 @@
     return idea.nodes;
   }
 
+  function projectFilesOf(idea) {
+    if (!Array.isArray(idea.files)) idea.files = [];
+    return idea.files;
+  }
+
+  function formatFileSize(bytes) {
+    const size = Number(bytes) || 0;
+    if (size < 1024) return size + ' B';
+    if (size < 1024 * 1024) return Math.round(size / 1024) + ' KB';
+    return Math.round((size / 1024 / 1024) * 10) / 10 + ' MB';
+  }
+
+  function projectFileIcon(file) {
+    const extension = String(file.name || '').split('.').pop().toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(extension)) return 'image';
+    if (['xls', 'xlsx', 'csv'].includes(extension)) return 'file-spreadsheet';
+    if (['ppt', 'pptx'].includes(extension)) return 'presentation';
+    if (['json', 'md', 'txt'].includes(extension)) return 'file-code-2';
+    if (extension === 'zip') return 'archive';
+    return 'file-text';
+  }
+
+  function aiProjectUrl(idea) {
+    return location.origin + '/api/ideas/' + encodeURIComponent(idea.id) + '/context';
+  }
+
+  function projectFileMarkup(idea, file) {
+    return '<div class="project-file-row"><div class="project-file-icon"><i data-lucide="' + projectFileIcon(file) + '"></i></div><div class="project-file-copy"><a href="' + escapeHTML(file.url) + '" download="' + escapeHTML(file.name || '项目资料') + '">' + escapeHTML(file.name || '未命名资料') + '</a><span>' + escapeHTML(formatFileSize(file.size)) + ' · ' + escapeHTML(formatTimestamp(file.uploadedAt || idea.updatedAt)) + '</span></div><a class="project-file-action" href="' + escapeHTML(file.url) + '" download="' + escapeHTML(file.name || '项目资料') + '" aria-label="下载' + escapeHTML(file.name || '项目资料') + '" data-tooltip="下载"><i data-lucide="download"></i></a><button class="project-file-action danger" data-action="remove-project-file" data-id="' + idea.id + '" data-file-id="' + file.id + '" type="button" aria-label="删除' + escapeHTML(file.name || '项目资料') + '" data-tooltip="删除"><i data-lucide="trash-2"></i></button></div>';
+  }
+
+  function projectMaterialsMarkup(idea) {
+    const files = projectFilesOf(idea);
+    const totalBytes = files.reduce((total, file) => total + (Number(file.size) || 0), 0);
+    const fileRows = files.map((file) => projectFileMarkup(idea, file)).join('');
+    return '<section class="editor-section project-materials-section"><div class="project-materials-head"><div class="editor-section-head"><span>02</span><div><h2>项目资料</h2><p>PRD、设计稿和开发资料统一保存在这里。</p></div></div><label class="button compact-button primary-button project-upload-button"><i data-lucide="upload"></i>上传资料<input data-project-files data-id="' + idea.id + '" type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.txt,.md,.csv,.json,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip" multiple hidden /></label></div>' +
+      '<div class="ai-project-entry"><div><span>AI 项目地址</span><input id="aiProjectUrl" value="' + escapeHTML(aiProjectUrl(idea)) + '" readonly /></div><button class="icon-button" data-action="copy-ai-project-url" data-id="' + idea.id + '" type="button" aria-label="复制 AI 项目地址" data-tooltip="复制地址"><i data-lucide="copy"></i></button></div>' +
+      '<div class="project-files-drop" data-project-drop data-id="' + idea.id + '">' + (files.length ? '<div class="project-files-summary"><strong>' + files.length + ' 个文件</strong><span>' + escapeHTML(formatFileSize(totalBytes)) + '</span></div><div class="project-file-list">' + fileRows + '</div>' : '<div class="project-files-empty"><i data-lucide="files"></i><div><strong>还没有项目资料</strong><span>拖入文件，或使用上传按钮选择多个文件。</span></div></div>') + '<span class="project-upload-status" aria-live="polite"></span></div></section>';
+  }
+
   function walkProjectNodes(nodes, callback) {
     (nodes || []).forEach((node) => {
       callback(node);
@@ -407,7 +448,7 @@
     const nodeOptions = nodes.map(({ node, depth }) =>
       '<option value="' + node.id + '"' + (idea.currentNodeId === node.id ? ' selected' : '') + '>' + '　'.repeat(depth) + escapeHTML(node.code + ' · ' + (node.title || '未命名节点')) + '</option>'
     ).join('');
-    return '<section class="execution-workspace"><div class="editor-section-head execution-head"><span>02</span><div><h2>把它往前推一步</h2><p>当前行动、完成线和项目节点使用同一套执行结构。</p></div></div><div class="execution-fields"><div><label class="field-label" for="detailCurrentNode">当前执行节点</label><select class="text-input" id="detailCurrentNode" name="currentNodeId"' + (nodes.length ? '' : ' disabled') + '><option value="">' + (nodes.length ? '暂不指定' : '请先添加项目节点') + '</option>' + nodeOptions + '</select></div><div><label class="field-label" for="detailNextAction">下一步动作</label><input class="text-input input-large" id="detailNextAction" name="nextAction" value="' + escapeHTML(idea.nextAction) + '" placeholder="选择节点后自动生成，也可以补充说明" /></div><div><label class="field-label" for="detailFinishLine">完成线</label><textarea class="text-input" id="detailFinishLine" name="finishLine" rows="2">' + escapeHTML(idea.finishLine) + '</textarea></div></div>' +
+    return '<section class="execution-workspace"><div class="editor-section-head execution-head"><span>05</span><div><h2>把它往前推一步</h2><p>当前行动、完成线和项目节点使用同一套执行结构。</p></div></div><div class="execution-fields"><div><label class="field-label" for="detailCurrentNode">当前执行节点</label><select class="text-input" id="detailCurrentNode" name="currentNodeId"' + (nodes.length ? '' : ' disabled') + '><option value="">' + (nodes.length ? '暂不指定' : '请先添加项目节点') + '</option>' + nodeOptions + '</select></div><div><label class="field-label" for="detailNextAction">下一步动作</label><input class="text-input input-large" id="detailNextAction" name="nextAction" value="' + escapeHTML(idea.nextAction) + '" placeholder="选择节点后自动生成，也可以补充说明" /></div><div><label class="field-label" for="detailFinishLine">完成线</label><textarea class="text-input" id="detailFinishLine" name="finishLine" rows="2">' + escapeHTML(idea.finishLine) + '</textarea></div></div>' +
       (currentNode ? '<div class="current-node-strip"><span class="node-code">' + escapeHTML(currentNode.code) + '</span><strong>' + escapeHTML(currentNode.title) + '</strong><span class="node-status-text ' + currentNode.status + '">' + NODE_STATUS_LABELS[currentNode.status || 'not_started'] + '</span></div>' : '') + projectTreeMarkup(idea) + '</section>';
   }
 
@@ -563,7 +604,7 @@
     return '<a class="back-link" href="#/' + idea.status + '"><i data-lucide="arrow-left"></i>返回' + STATUS_LABELS[idea.status] + '</a>' +
       '<section class="detail-page-head"><div><div class="detail-page-meta">' + statusPill(idea) + '<span>更新于 ' + formatRelative(idea.updatedAt) + '</span></div><h1>' + escapeHTML(idea.title) + '</h1><p>在一个页面里完成判断、计划和实验记录。</p></div><button class="icon-button danger-icon" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="删除这个想法"><i data-lucide="trash-2"></i></button></section>' +
       '<form id="detailForm" data-id="' + idea.id + '"><div class="editor-layout"><div class="editor-main">' +
-      '<section class="editor-section"><div class="editor-section-head"><span>01</span><div><h2>想法本身</h2><p>先说清楚问题和最小版本。</p></div></div><div class="field-group"><label class="field-label" for="detailTitle">想法标题 <span>*</span></label><input class="text-input input-large" id="detailTitle" name="title" value="' + escapeHTML(idea.title) + '" maxlength="80" required /></div><div class="field-group"><label class="field-label" for="detailProblem">它在解决什么问题</label><textarea class="text-input" id="detailProblem" name="problem" rows="4">' + escapeHTML(idea.problem) + '</textarea></div><div class="form-row"><div><label class="field-label" for="detailAudience">可能会需要的人</label><textarea class="text-input" id="detailAudience" name="audience" rows="3">' + escapeHTML(idea.audience) + '</textarea></div><div><label class="field-label" for="detailMvp">我能做出的最小版本</label><textarea class="text-input" id="detailMvp" name="mvp" rows="3">' + escapeHTML(idea.mvp) + '</textarea></div></div></section>' +
+      '<section class="editor-section"><div class="editor-section-head"><span>01</span><div><h2>想法本身</h2><p>先说清楚问题和最小版本。</p></div></div><div class="field-group"><label class="field-label" for="detailTitle">想法标题 <span>*</span></label><input class="text-input input-large" id="detailTitle" name="title" value="' + escapeHTML(idea.title) + '" maxlength="80" required /></div><div class="field-group"><label class="field-label" for="detailProblem">它在解决什么问题</label><textarea class="text-input" id="detailProblem" name="problem" rows="4">' + escapeHTML(idea.problem) + '</textarea></div><div class="form-row"><div><label class="field-label" for="detailAudience">可能会需要的人</label><textarea class="text-input" id="detailAudience" name="audience" rows="3">' + escapeHTML(idea.audience) + '</textarea></div><div><label class="field-label" for="detailMvp">我能做出的最小版本</label><textarea class="text-input" id="detailMvp" name="mvp" rows="3">' + escapeHTML(idea.mvp) + '</textarea></div></div></section>' + projectMaterialsMarkup(idea) +
       '</div>' +
       '<aside class="editor-rail"><section class="rail-section"><div class="editor-section-head"><span>03</span><div><h2>投入判断</h2><p>用同一把尺子比较想法。</p></div></div><div class="score-grid"><div class="score-field"><label for="interestRange">兴趣 <output id="interestOutput">' + idea.interest + '</output>/5</label><input id="interestRange" name="interest" type="range" min="1" max="5" value="' + idea.interest + '" /></div><div class="score-field"><label for="valueRange">价值 <output id="valueOutput">' + idea.value + '</output>/5</label><input id="valueRange" name="value" type="range" min="1" max="5" value="' + idea.value + '" /></div><div class="score-field"><label for="easeRange">易验证 <output id="easeOutput">' + idea.ease + '</output>/5</label><input id="easeRange" name="ease" type="range" min="1" max="5" value="' + idea.ease + '" /></div></div><div class="score-total"><span>验证优先级</span><strong id="detailScore">' + scoreOf(idea) + '<small>/10</small></strong></div></section>' +
       '<section class="rail-section experiment-box"><div class="editor-section-head"><span>04</span><div><h2>48 小时实验</h2><p>先证明它值得继续。</p></div></div><div class="field-group"><label class="field-label" for="experimentGoal">我要验证什么</label><textarea class="text-input" id="experimentGoal" name="experimentGoal" rows="3">' + escapeHTML(idea.experimentGoal) + '</textarea></div><div class="field-group"><label class="field-label" for="experimentResult">结果记录</label><textarea class="text-input" id="experimentResult" name="experimentResult" rows="3">' + escapeHTML(idea.experimentResult) + '</textarea></div><label class="field-label" for="experimentStatus">实验状态</label><select class="text-input" id="experimentStatus" name="experimentStatus"><option value="not_started"' + (idea.experimentStatus === 'not_started' ? ' selected' : '') + '>还没开始</option><option value="in_progress"' + (idea.experimentStatus === 'in_progress' ? ' selected' : '') + '>进行中</option><option value="completed"' + (idea.experimentStatus === 'completed' ? ' selected' : '') + '>已完成</option></select></section>' +
@@ -648,6 +689,8 @@
       experimentStatus: 'not_started',
       experimentGoal: '',
       experimentResult: '',
+      files: [],
+      nodes: [],
       createdAt: now,
       updatedAt: now
     };
@@ -813,6 +856,87 @@
     if (field === 'status') renderApp();
   }
 
+  function fileExtension(file) {
+    return String(file.name || '').split('.').pop().toLowerCase();
+  }
+
+  async function uploadFileToNas(file) {
+    const response = await fetch('/api/uploads?name=' + encodeURIComponent(file.name), {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file
+    });
+    if (!response.ok) throw new Error('upload failed');
+    return response.json();
+  }
+
+  async function uploadProjectFiles(ideaId, fileList, input) {
+    const idea = ideaById(ideaId);
+    const files = Array.from(fileList || []);
+    if (!idea || !files.length) return;
+    const accepted = files.filter((file) => PROJECT_FILE_EXTENSIONS.has(fileExtension(file)) && file.size > 0 && file.size <= MAX_PROJECT_FILE_BYTES);
+    const rejected = files.length - accepted.length;
+    if (!accepted.length) {
+      showToast('文件格式不支持，或单个文件超过 50 MB');
+      if (input) input.value = '';
+      return;
+    }
+    const status = $('.project-upload-status');
+    let uploaded = 0;
+    let failed = rejected;
+    for (let index = 0; index < accepted.length; index += 1) {
+      if (status) status.textContent = '正在上传 ' + (index + 1) + ' / ' + accepted.length;
+      try {
+        const file = await uploadFileToNas(accepted[index]);
+        projectFilesOf(idea).push({ id: 'file-' + uid(), ...file });
+        uploaded += 1;
+      } catch (error) {
+        failed += 1;
+      }
+    }
+    if (uploaded) {
+      idea.updatedAt = new Date().toISOString();
+      saveData('项目资料已上传');
+      renderApp();
+    } else if (status) {
+      status.textContent = '';
+    }
+    if (input) input.value = '';
+    showToast(uploaded + ' 个文件已上传' + (failed ? '，' + failed + ' 个失败' : ''));
+  }
+
+  function removeProjectFile(ideaId, fileId) {
+    const idea = ideaById(ideaId);
+    const file = idea ? projectFilesOf(idea).find((item) => item.id === fileId) : null;
+    if (!idea || !file || !window.confirm('确定删除“' + file.name + '”吗？')) return;
+    idea.files = projectFilesOf(idea).filter((item) => item.id !== fileId);
+    deleteUploadedFile(file.url);
+    idea.updatedAt = new Date().toISOString();
+    saveData('已删除项目资料');
+    renderApp();
+    showToast('项目资料已删除');
+  }
+
+  async function copyAiProjectUrl(ideaId) {
+    const idea = ideaById(ideaId);
+    if (!idea) return;
+    const url = aiProjectUrl(idea);
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(url);
+      copied = true;
+    } catch (error) {
+      const input = $('#aiProjectUrl');
+      if (input) {
+        input.focus();
+        input.select();
+        input.setSelectionRange(0, input.value.length);
+        copied = document.execCommand('copy');
+      }
+    }
+    showToast(copied ? 'AI 项目地址已复制' : '地址已选中，请复制');
+  }
+
   async function uploadProjectNodeImage(input) {
     const file = input.files?.[0];
     const idea = ideaById(input.dataset.id);
@@ -831,13 +955,7 @@
     const status = $('#saveStatus');
     if (status) status.textContent = '正在上传截图...';
     try {
-      const response = await fetch('/api/uploads?name=' + encodeURIComponent(file.name), {
-        method: 'POST',
-        headers: { 'Content-Type': file.type },
-        body: file
-      });
-      if (!response.ok) throw new Error('upload failed');
-      const attachment = await response.json();
+      const attachment = await uploadFileToNas(file);
       if (!Array.isArray(node.attachments)) node.attachments = [];
       node.attachments.push({ id: 'attachment-' + uid(), ...attachment });
       node.updatedAt = new Date().toISOString();
@@ -907,6 +1025,10 @@
   function deleteIdea(id) {
     const idea = ideaById(id);
     if (!idea || !window.confirm('确定要删除“' + idea.title + '”吗？')) return;
+    projectFilesOf(idea).forEach((file) => deleteUploadedFile(file.url));
+    walkProjectNodes(projectNodesOf(idea), (node) => {
+      (node.attachments || []).forEach((attachment) => deleteUploadedFile(attachment.url));
+    });
     state.ideas = state.ideas.filter((item) => item.id !== id);
     if (state.focusId === id) state.focusId = state.ideas.find((item) => item.status === 'try')?.id || null;
     saveData('已删除这个想法');
@@ -916,7 +1038,7 @@
   }
 
   function exportData() {
-    const payload = JSON.stringify({ version: 2, exportedAt: new Date().toISOString(), ideas: state.ideas, focusId: state.focusId, review: state.review }, null, 2);
+    const payload = JSON.stringify({ version: 3, exportedAt: new Date().toISOString(), ideas: state.ideas, focusId: state.focusId, review: state.review }, null, 2);
     const blob = new Blob([payload], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -982,6 +1104,8 @@
       }
       if (type === 'import-bulk-nodes') importBulkProjectNodes(id);
       if (type === 'remove-node-attachment') removeProjectNodeAttachment(id, action.dataset.nodeId, action.dataset.attachmentId);
+      if (type === 'remove-project-file') removeProjectFile(id, action.dataset.fileId);
+      if (type === 'copy-ai-project-url') copyAiProjectUrl(id);
       if (type === 'status-menu') {
         const menu = action.parentElement.querySelector('.status-menu');
         const willOpen = menu.hidden;
@@ -1065,6 +1189,10 @@
         uploadProjectNodeImage(event.target);
         return;
       }
+      if (event.target.matches('[data-project-files]')) {
+        uploadProjectFiles(event.target.dataset.id, event.target.files, event.target);
+        return;
+      }
       if (event.target.id === 'sortSelect') state.sort = event.target.value;
       else if (event.target.id === 'tagSelect') state.tag = event.target.value;
       else return;
@@ -1073,6 +1201,26 @@
         results.innerHTML = allResultsMarkup();
         renderIcons();
       }
+    });
+
+    $('#pageContent').addEventListener('dragover', (event) => {
+      const dropZone = event.target.closest('[data-project-drop]');
+      if (!dropZone) return;
+      event.preventDefault();
+      dropZone.classList.add('is-dragging');
+    });
+
+    $('#pageContent').addEventListener('dragleave', (event) => {
+      const dropZone = event.target.closest('[data-project-drop]');
+      if (dropZone) dropZone.classList.remove('is-dragging');
+    });
+
+    $('#pageContent').addEventListener('drop', (event) => {
+      const dropZone = event.target.closest('[data-project-drop]');
+      if (!dropZone) return;
+      event.preventDefault();
+      dropZone.classList.remove('is-dragging');
+      uploadProjectFiles(dropZone.dataset.id, event.dataTransfer?.files);
     });
 
     $('#openSidebar').addEventListener('click', () => $('#sidebar').classList.add('is-open'));
