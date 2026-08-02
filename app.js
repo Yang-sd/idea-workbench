@@ -161,14 +161,20 @@
       if (response.ok) {
         const parsed = await response.json();
         if (!parsed || !Array.isArray(parsed.ideas)) throw new Error('invalid remote state');
-        return {
+        const normalized = {
           ideas: parsed.ideas,
           focusId: parsed.focusId || parsed.ideas.find((idea) => idea.status === 'try')?.id || null,
-          review: parsed.review || {},
-          persistence: 'nas'
+          review: parsed.review || {}
         };
+        let renumbered = false;
+        normalized.ideas.forEach((idea) => {
+          if (renumberProjectNodes(idea)) renumbered = true;
+        });
+        if (renumbered) await writeRemoteData(dataPayload(normalized));
+        return { ...normalized, persistence: 'nas', renumbered };
       }
       if (response.status !== 404) throw new Error('remote read failed');
+      local.ideas.forEach((idea) => renumberProjectNodes(idea));
       await writeRemoteData(dataPayload(local));
       return { ...local, persistence: 'nas', migrated: true };
     } catch (error) {
@@ -190,6 +196,22 @@
   const projectUi = {
     expandedNodes: new Set(),
     bulkIdeaId: null
+  };
+  const nodeDrag = {
+    holdTimer: null,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    offsetY: 0,
+    ideaId: null,
+    nodeId: null,
+    parentNodeId: null,
+    handle: null,
+    source: null,
+    container: null,
+    placeholder: null,
+    ghost: null,
+    active: false
   };
 
   function parseRoute() {
@@ -364,6 +386,37 @@
     return nextNumber;
   }
 
+  function autoNodeAction(node) {
+    return node ? '执行 ' + node.code + '：' + node.title : '';
+  }
+
+  function renumberProjectNodes(idea, removedCodes) {
+    const nodesByOldCode = new Map();
+    const previousAction = idea.nextAction || '';
+    let changed = false;
+    let sequence = 1;
+    walkProjectNodes(projectNodesOf(idea), (node) => {
+      nodesByOldCode.set(node.code, node);
+      const nextCode = 'P-' + String(sequence).padStart(3, '0');
+      if (node.code !== nextCode) changed = true;
+      node.code = nextCode;
+      sequence += 1;
+    });
+    if (Number(idea.nodeSequence) !== sequence) changed = true;
+    idea.nodeSequence = sequence;
+    const actionMatch = /^执行 (P-\d+)：/.exec(idea.nextAction || '');
+    if (actionMatch) {
+      const currentNode = findProjectNode(idea, idea.currentNodeId);
+      if (currentNode) idea.nextAction = autoNodeAction(currentNode);
+      else if (removedCodes?.has(actionMatch[1])) idea.nextAction = '';
+      else {
+        const referencedNode = nodesByOldCode.get(actionMatch[1]);
+        if (referencedNode) idea.nextAction = autoNodeAction(referencedNode);
+      }
+    }
+    return changed || previousAction !== (idea.nextAction || '');
+  }
+
   function createProjectNode(code, title) {
     const now = new Date().toISOString();
     return {
@@ -402,7 +455,7 @@
     return '<figure class="node-attachment"><a href="' + escapeHTML(attachment.url) + '" target="_blank" rel="noopener"><img src="' + escapeHTML(attachment.url) + '" alt="' + escapeHTML(attachment.name || '节点截图') + '" /></a><figcaption><span>' + escapeHTML(attachment.name || '截图') + '</span><button data-action="remove-node-attachment" data-id="' + idea.id + '" data-node-id="' + node.id + '" data-attachment-id="' + attachment.id + '" type="button" aria-label="删除截图"><i data-lucide="x"></i></button></figcaption></figure>';
   }
 
-  function projectNodeMarkup(idea, node) {
+  function projectNodeMarkup(idea, node, parentNodeId) {
     if (!Array.isArray(node.children)) node.children = [];
     if (!Array.isArray(node.attachments)) node.attachments = [];
     if (!NODE_STATUS_LABELS[node.status]) node.status = 'not_started';
@@ -412,9 +465,9 @@
       '<option value="' + status + '"' + (node.status === status ? ' selected' : '') + '>' + label + '</option>'
     ).join('');
     const attachments = node.attachments.map((attachment) => projectNodeAttachmentMarkup(idea, node, attachment)).join('');
-    const children = node.children.map((child) => projectNodeMarkup(idea, child)).join('');
-    return '<article class="project-node node-status-' + (node.status || 'not_started') + (current ? ' is-current' : '') + '" data-node-id="' + node.id + '" data-node-code="' + escapeHTML(node.code) + '">' +
-      '<div class="project-node-row"><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
+    const children = node.children.map((child) => projectNodeMarkup(idea, child, node.id)).join('');
+    return '<article class="project-node node-status-' + (node.status || 'not_started') + (current ? ' is-current' : '') + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" data-node-code="' + escapeHTML(node.code) + '">' +
+      '<div class="project-node-row"><button class="node-drag-handle" data-node-drag data-id="' + idea.id + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" type="button" aria-label="按住后上下拖动 ' + escapeHTML(node.code) + '" data-tooltip="按住拖动排序"><i data-lucide="grip-vertical"></i></button><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
       '<div class="project-node-expanded"' + (expanded ? '' : ' hidden') + '><div class="project-node-body"><label><span>节点记录</span><textarea data-node-field="content" data-id="' + idea.id + '" data-node-id="' + node.id + '" rows="3" placeholder="记录说明、执行结果、AI 处理备注等">' + escapeHTML(node.content || '') + '</textarea></label><div class="node-attachments"><div class="node-attachments-head"><span>截图与图片</span><label class="node-upload-button"><i data-lucide="image-plus"></i>添加截图<input data-node-upload data-id="' + idea.id + '" data-node-id="' + node.id + '" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label></div><div class="node-attachment-grid">' + (attachments || '<span class="node-attachment-empty">还没有截图</span>') + '</div></div></div>' +
       (children ? '<div class="project-node-children">' + children + '</div>' : '') + '</div></article>';
   }
@@ -424,10 +477,10 @@
     const stats = projectNodeStats(idea);
     const progress = stats.total ? Math.round((stats.completed / stats.total) * 100) : 0;
     const bulkOpen = projectUi.bulkIdeaId === idea.id;
-    return '<section class="project-tree-section"><div class="project-tree-head"><div><p class="eyebrow">PROJECT NODES</p><h2>项目节点</h2><p>用稳定编号拆解项目，AI 可以按编号记录进度或标记完成。</p></div><div class="project-tree-actions"><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="clipboard-list"></i>批量录入</button><button class="button compact-button primary-button" data-action="add-root-node" data-id="' + idea.id + '" type="button"><i data-lucide="plus"></i>添加根节点</button></div></div>' +
+    return '<section class="project-tree-section"><div class="project-tree-head"><div><p class="eyebrow">PROJECT NODES</p><h2>项目节点</h2><p>用连续编号拆解项目，AI 可以按编号记录进度或标记完成。</p></div><div class="project-tree-actions"><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="clipboard-list"></i>批量录入</button><button class="button compact-button primary-button" data-action="add-root-node" data-id="' + idea.id + '" type="button"><i data-lucide="plus"></i>添加根节点</button></div></div>' +
       '<div class="project-node-summary"><div><strong>' + stats.completed + '</strong><span>/ ' + stats.total + ' 已完成</span></div><div class="node-progress-track"><span style="width:' + progress + '%"></span></div><span>' + stats.inProgress + ' 个进行中</span></div>' +
       '<div class="bulk-node-panel"' + (bulkOpen ? '' : ' hidden') + '><label for="bulkNodeInput">批量粘贴节点</label><p>每行一个节点；使用两个空格或 Tab 表示下一级。</p><textarea id="bulkNodeInput" rows="8" placeholder="产品范围\n  个人版页面\n    图片上传\n    图片预览\n  数据管理\n    删除与恢复"></textarea><div><button class="button compact-button ghost-button" data-action="toggle-bulk-nodes" data-id="' + idea.id + '" type="button">取消</button><button class="button compact-button primary-button" data-action="import-bulk-nodes" data-id="' + idea.id + '" type="button"><i data-lucide="import"></i>导入节点</button></div></div>' +
-      '<div class="project-tree">' + (nodes.length ? nodes.map((node) => projectNodeMarkup(idea, node)).join('') : '<div class="project-tree-empty"><i data-lucide="list-tree"></i><div><strong>还没有项目节点</strong><span>添加一个根节点，或一次粘贴完整的项目清单。</span></div></div>') + '</div></section>';
+      '<div class="project-tree">' + (nodes.length ? nodes.map((node) => projectNodeMarkup(idea, node, null)).join('') : '<div class="project-tree-empty"><i data-lucide="list-tree"></i><div><strong>还没有项目节点</strong><span>添加一个根节点，或一次粘贴完整的项目清单。</span></div></div>') + '</div></section>';
   }
 
   function flatProjectNodes(idea) {
@@ -763,7 +816,8 @@
     if (!idea || !node) return;
     const willClear = idea.currentNodeId === node.id;
     idea.currentNodeId = willClear ? null : node.id;
-    if (!willClear) idea.nextAction = '执行 ' + node.code + '：' + node.title;
+    if (willClear && (idea.nextAction || '').startsWith('执行 ' + node.code + '：')) idea.nextAction = '';
+    if (!willClear) idea.nextAction = autoNodeAction(node);
     idea.updatedAt = new Date().toISOString();
     saveData(willClear ? '已取消当前执行节点' : '已设置当前执行节点');
     renderApp();
@@ -780,12 +834,15 @@
     const removed = removeProjectNode(projectNodesOf(idea), nodeId);
     if (!removed) return;
     let removedCurrentNode = false;
+    const removedCodes = new Set();
     walkProjectNodes([removed], (item) => {
       if (idea.currentNodeId === item.id) removedCurrentNode = true;
+      removedCodes.add(item.code);
       (item.attachments || []).forEach((attachment) => deleteUploadedFile(attachment.url));
       projectUi.expandedNodes.delete(item.id);
     });
     if (removedCurrentNode) idea.currentNodeId = null;
+    renumberProjectNodes(idea, removedCodes);
     idea.updatedAt = new Date().toISOString();
     saveData('已删除项目节点');
     renderApp();
@@ -846,7 +903,7 @@
     if (field === 'status' && !NODE_STATUS_LABELS[input.value]) return;
     node[field] = field === 'title' ? input.value.trim() || '未命名节点' : input.value.trim();
     if (field === 'title' && idea.currentNodeId === node.id) {
-      idea.nextAction = '执行 ' + node.code + '：' + node.title;
+      idea.nextAction = autoNodeAction(node);
       const nextActionInput = $('#detailNextAction');
       if (nextActionInput) nextActionInput.value = idea.nextAction;
     }
@@ -854,6 +911,146 @@
     idea.updatedAt = node.updatedAt;
     saveData('已保存 ' + node.code);
     if (field === 'status') renderApp();
+  }
+
+  function projectNodeSiblings(idea, parentNodeId) {
+    if (!parentNodeId) return projectNodesOf(idea);
+    const parentNode = findProjectNode(idea, parentNodeId);
+    if (!parentNode) return null;
+    if (!Array.isArray(parentNode.children)) parentNode.children = [];
+    return parentNode.children;
+  }
+
+  function moveProjectNode(ideaId, nodeId, parentNodeId, destinationIndex) {
+    const idea = ideaById(ideaId);
+    const siblings = idea ? projectNodeSiblings(idea, parentNodeId) : null;
+    if (!idea || !siblings) return;
+    const sourceIndex = siblings.findIndex((node) => node.id === nodeId);
+    if (sourceIndex < 0) return;
+    const [node] = siblings.splice(sourceIndex, 1);
+    const nextIndex = Math.max(0, Math.min(Number(destinationIndex) || 0, siblings.length));
+    siblings.splice(nextIndex, 0, node);
+    if (sourceIndex === nextIndex) return;
+    renumberProjectNodes(idea);
+    const now = new Date().toISOString();
+    node.updatedAt = now;
+    idea.updatedAt = now;
+    saveData('已调整节点顺序');
+    renderApp();
+    showToast(node.code + ' 已移动到新位置');
+  }
+
+  function clearNodeDragTimer() {
+    if (!nodeDrag.holdTimer) return;
+    window.clearTimeout(nodeDrag.holdTimer);
+    nodeDrag.holdTimer = null;
+  }
+
+  function resetNodeDrag() {
+    clearNodeDragTimer();
+    nodeDrag.handle?.classList.remove('is-pressing');
+    nodeDrag.source?.classList.remove('is-dragging-source');
+    nodeDrag.placeholder?.remove();
+    nodeDrag.ghost?.remove();
+    document.body.classList.remove('is-node-dragging');
+    Object.assign(nodeDrag, {
+      pointerId: null,
+      ideaId: null,
+      nodeId: null,
+      parentNodeId: null,
+      handle: null,
+      source: null,
+      container: null,
+      placeholder: null,
+      ghost: null,
+      active: false
+    });
+  }
+
+  function beginNodeDrag() {
+    const source = nodeDrag.handle?.closest('.project-node');
+    const row = source?.querySelector(':scope > .project-node-row');
+    if (!source || !row || !source.parentElement) {
+      resetNodeDrag();
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const placeholder = document.createElement('div');
+    placeholder.className = 'project-node-drop-placeholder';
+    placeholder.style.height = rect.height + 'px';
+    const ghost = row.cloneNode(true);
+    ghost.className = 'project-node-row project-node-drag-ghost';
+    ghost.style.left = rect.left + 'px';
+    ghost.style.top = rect.top + 'px';
+    ghost.style.width = rect.width + 'px';
+    ghost.querySelectorAll('input, select, button').forEach((control) => { control.disabled = true; });
+    source.before(placeholder);
+    source.classList.add('is-dragging-source');
+    nodeDrag.handle.classList.remove('is-pressing');
+    document.body.append(ghost);
+    document.body.classList.add('is-node-dragging');
+    Object.assign(nodeDrag, {
+      source,
+      container: source.parentElement,
+      placeholder,
+      ghost,
+      offsetY: Math.max(0, Math.min(nodeDrag.startY - rect.top, rect.height)),
+      active: true
+    });
+  }
+
+  function startNodeDrag(event, handle) {
+    if (event.button !== 0 || nodeDrag.pointerId !== null) return;
+    event.preventDefault();
+    Object.assign(nodeDrag, {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      ideaId: handle.dataset.id,
+      nodeId: handle.dataset.nodeId,
+      parentNodeId: handle.dataset.parentNodeId || null,
+      handle
+    });
+    handle.classList.add('is-pressing');
+    nodeDrag.holdTimer = window.setTimeout(beginNodeDrag, 280);
+  }
+
+  function updateNodeDrag(event) {
+    if (event.pointerId !== nodeDrag.pointerId) return;
+    if (!nodeDrag.active) {
+      if (Math.hypot(event.clientX - nodeDrag.startX, event.clientY - nodeDrag.startY) > 7) resetNodeDrag();
+      return;
+    }
+    event.preventDefault();
+    nodeDrag.ghost.style.top = (event.clientY - nodeDrag.offsetY) + 'px';
+    if (event.clientY < 72) window.scrollBy(0, -12);
+    else if (event.clientY > window.innerHeight - 72) window.scrollBy(0, 12);
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.project-node');
+    if (!target || target === nodeDrag.source || target.parentElement !== nodeDrag.container) return;
+    const row = target.querySelector(':scope > .project-node-row');
+    if (!row) return;
+    const rect = row.getBoundingClientRect();
+    if (event.clientY < rect.top + rect.height / 2) target.before(nodeDrag.placeholder);
+    else target.after(nodeDrag.placeholder);
+  }
+
+  function finishNodeDrag(event, cancelled) {
+    if (event && event.pointerId !== nodeDrag.pointerId) return;
+    if (!nodeDrag.active || cancelled) {
+      resetNodeDrag();
+      return;
+    }
+    const ideaId = nodeDrag.ideaId;
+    const nodeId = nodeDrag.nodeId;
+    const parentNodeId = nodeDrag.parentNodeId;
+    let destinationIndex = 0;
+    Array.from(nodeDrag.container.children).some((element) => {
+      if (element === nodeDrag.placeholder) return true;
+      if (element.matches('.project-node') && element !== nodeDrag.source) destinationIndex += 1;
+      return false;
+    });
+    resetNodeDrag();
+    moveProjectNode(ideaId, nodeId, parentNodeId, destinationIndex);
   }
 
   function fileExtension(file) {
@@ -1081,6 +1278,19 @@
       createIdea(event.currentTarget, false);
     });
 
+    $('#pageContent').addEventListener('pointerdown', (event) => {
+      const handle = event.target.closest('[data-node-drag]');
+      if (handle) startNodeDrag(event, handle);
+    });
+
+    $('#pageContent').addEventListener('contextmenu', (event) => {
+      if (event.target.closest('[data-node-drag]')) event.preventDefault();
+    });
+
+    document.addEventListener('pointermove', updateNodeDrag, { passive: false });
+    document.addEventListener('pointerup', (event) => finishNodeDrag(event, false));
+    document.addEventListener('pointercancel', (event) => finishNodeDrag(event, true));
+
     $('#pageContent').addEventListener('click', (event) => {
       const action = event.target.closest('[data-action]');
       if (!action) return;
@@ -1178,7 +1388,7 @@
         const idea = ideaById(event.target.closest('form')?.dataset.id);
         const node = idea ? findProjectNode(idea, event.target.value) : null;
         const nextActionInput = $('#detailNextAction');
-        if (nextActionInput) nextActionInput.value = node ? '执行 ' + node.code + '：' + node.title : '';
+        if (nextActionInput) nextActionInput.value = autoNodeAction(node);
         return;
       }
       if (event.target.dataset.nodeField) {
@@ -1251,6 +1461,7 @@
         }
       }
       if (event.key === 'Escape') {
+        if (nodeDrag.pointerId !== null) finishNodeDrag(null, true);
         if (!$('#captureModal').hidden) closeCapture();
         if (!$('#shortcutsModal').hidden) $('#shortcutsModal').hidden = true;
         $('#sidebar').classList.remove('is-open');
@@ -1285,6 +1496,7 @@
     const status = $('#saveStatus');
     if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
     if (stored.migrated) showToast('本机数据已同步到 NAS');
+    else if (stored.renumbered) showToast('项目节点编号已自动整理');
   }
 
   bindEvents();
