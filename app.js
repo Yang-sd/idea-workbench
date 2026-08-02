@@ -198,7 +198,6 @@
     bulkIdeaId: null
   };
   const nodeDrag = {
-    holdTimer: null,
     pointerId: null,
     startX: 0,
     startY: 0,
@@ -467,7 +466,7 @@
     const attachments = node.attachments.map((attachment) => projectNodeAttachmentMarkup(idea, node, attachment)).join('');
     const children = node.children.map((child) => projectNodeMarkup(idea, child, node.id)).join('');
     return '<article class="project-node node-status-' + (node.status || 'not_started') + (current ? ' is-current' : '') + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" data-node-code="' + escapeHTML(node.code) + '">' +
-      '<div class="project-node-row"><button class="node-drag-handle" data-node-drag data-id="' + idea.id + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" type="button" aria-label="按住后上下拖动 ' + escapeHTML(node.code) + '" data-tooltip="按住拖动排序"><i data-lucide="grip-vertical"></i></button><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
+      '<div class="project-node-row"><button class="node-drag-handle" data-node-drag data-id="' + idea.id + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" type="button" aria-label="上下拖动 ' + escapeHTML(node.code) + '" data-tooltip="拖动排序"><i data-lucide="grip-vertical"></i></button><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
       '<div class="project-node-expanded"' + (expanded ? '' : ' hidden') + '><div class="project-node-body"><label><span>节点记录</span><textarea data-node-field="content" data-id="' + idea.id + '" data-node-id="' + node.id + '" rows="3" placeholder="记录说明、执行结果、AI 处理备注等">' + escapeHTML(node.content || '') + '</textarea></label><div class="node-attachments"><div class="node-attachments-head"><span>截图与图片</span><label class="node-upload-button"><i data-lucide="image-plus"></i>添加截图<input data-node-upload data-id="' + idea.id + '" data-node-id="' + node.id + '" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label></div><div class="node-attachment-grid">' + (attachments || '<span class="node-attachment-empty">还没有截图</span>') + '</div></div></div>' +
       (children ? '<div class="project-node-children">' + children + '</div>' : '') + '</div></article>';
   }
@@ -940,15 +939,7 @@
     showToast(node.code + ' 已移动到新位置');
   }
 
-  function clearNodeDragTimer() {
-    if (!nodeDrag.holdTimer) return;
-    window.clearTimeout(nodeDrag.holdTimer);
-    nodeDrag.holdTimer = null;
-  }
-
   function resetNodeDrag() {
-    clearNodeDragTimer();
-    nodeDrag.handle?.classList.remove('is-pressing');
     nodeDrag.source?.classList.remove('is-dragging-source');
     nodeDrag.placeholder?.remove();
     nodeDrag.ghost?.remove();
@@ -986,7 +977,6 @@
     ghost.querySelectorAll('input, select, button').forEach((control) => { control.disabled = true; });
     source.before(placeholder);
     source.classList.add('is-dragging-source');
-    nodeDrag.handle.classList.remove('is-pressing');
     document.body.append(ghost);
     document.body.classList.add('is-node-dragging');
     Object.assign(nodeDrag, {
@@ -1011,8 +1001,7 @@
       parentNodeId: handle.dataset.parentNodeId || null,
       handle
     });
-    handle.classList.add('is-pressing');
-    nodeDrag.holdTimer = window.setTimeout(beginNodeDrag, 280);
+    beginNodeDrag();
   }
 
   function updateNodeDrag(event) {
