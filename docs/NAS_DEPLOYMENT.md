@@ -61,7 +61,18 @@ NAS 的非交互式 SSH 环境不会自动包含 Container Manager 的路径。�
 /usr/local/bin/docker
 ```
 
-同步项目文件后，在 NAS 上执行：
+首次部署或升级认证前，在项目目录创建只读备份，并配置只保存在 NAS 的 `.env`：
+
+```bash
+cd /var/services/homes/deploy/project/idea-workbench
+cp -a data "data.before-$(date +%Y%m%d-%H%M%S)"
+cp .env.example .env
+chmod 600 .env
+```
+
+把 `.env` 中的示例密码替换为长随机密码。`.env` 已被 Git 忽略，不得同步回本机仓库、日志或聊天记录。
+
+随后在 NAS 上执行：
 
 ```bash
 cd /var/services/homes/deploy/project/idea-workbench
@@ -70,11 +81,13 @@ sudo /usr/local/bin/docker-compose ps
 curl -fsS http://127.0.0.1:8184/healthz
 ```
 
-数据通过同源 API 写入 `data/state.json`，项目资料和节点截图写入 `data/uploads`。Compose 使用 `./data:/app/data` 挂载整个数据目录，重建镜像或容器不会删除想法数据与上传文件。
+数据通过同源 API 写入 `data/state.json`，项目资料和节点截图写入 `data/uploads`，历史状态滚动保存在 `data/backups`。Compose 使用 `./data:/app/data` 挂载整个数据目录，重建镜像或容器不会删除想法数据、上传文件和最近 25 份状态备份。
 
 备份时需要完整备份 `data` 目录。网页导出的 JSON 只包含上传文件地址，不包含文件二进制内容。
 
-当前版本暂不接入账号认证，公网域名上的 `/api/state`、`/api/uploads` 和单项目节点更新接口均具备写入能力，只适合个人或受信任环境。后续接入账号时，需要在 API 层校验当前用户，并将数据和上传目录按用户隔离。
+生产 Compose 强制配置 `IDEA_DESK_USERNAME` 和 `IDEA_DESK_PASSWORD`，整站和全部 `/api/*`、`/uploads/*` 使用 Basic Auth。缺少任一凭据时容器拒绝启动；`/healthz` 是唯一匿名入口。当前仍是单 Workspace 个人应用，后续多人化时还需要实体级授权和租户隔离。
+
+静态服务使用白名单，公网不得访问 `/data/*`、`/server.py`、`/README.md` 或目录列表。附件响应使用 `private, no-store`，避免经过浏览器或边缘节点长期公共缓存。
 
 单项目 AI 上下文接口：
 
@@ -90,6 +103,15 @@ PATCH /api/ideas/<idea-id>/nodes/<node-id>
 
 请求体可以包含 `status` 和 `content`；状态只允许 `not_started`、`in_progress`、`completed`。
 
+Context 响应中的 `stateRevision` 是当前状态修订。节点 PATCH 可携带 `If-Match: "<stateRevision>"`；修订不一致返回 409。浏览器对 `/api/state` 的整包 PUT 必须携带 `If-Match`，缺少时返回 428，防止多标签页或 AI 更新被旧快照静默覆盖。
+
+命令行访问需要显式认证，例如：
+
+```bash
+curl -fsS -u "$IDEA_DESK_USERNAME:$IDEA_DESK_PASSWORD" \
+  https://ideas.yangjunhu.com/api/ideas/<idea-id>/context
+```
+
 公网验证：
 
 ```bash
@@ -101,6 +123,10 @@ curl -fsS https://ideas.yangjunhu.com/healthz
 ```text
 ok
 ```
+
+健康检查同时验证数据目录可读写、`state.json` 可解析，以及已存在的上传和备份目录可用；状态损坏时返回 503 `unhealthy`。
+
+发布后还要验证以下路径：匿名访问首页返回 401，认证访问首页返回 200，`/data/state.json`、`/data/`、`/data/uploads/` 和 `/server.py` 均返回 404。
 
 ## 文件同步
 

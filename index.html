@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f6f7f5" />
-    <title>想法台 · Idea Desk</title>
+    <title>Ideas 2.0 · Product Development OS</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
     <script src="https://unpkg.com/lucide@latest"></script>
-    <link rel="stylesheet" href="styles.css?v=20260803-node-sort-v2" />
+    <link rel="stylesheet" href="styles.css?v=20260815-ideas-2-foundation" />
   </head>
   <body>
     <div class="app-shell">
@@ -17,8 +17,8 @@
         <div class="brand-row">
           <div class="brand-mark" aria-hidden="true"><i data-lucide="sparkles"></i></div>
           <div>
-            <div class="brand-name">想法台</div>
-            <div class="brand-caption">IDEA DESK</div>
+            <div class="brand-name">Ideas 2.0</div>
+            <div class="brand-caption">PRODUCT DEVELOPMENT OS</div>
           </div>
           <button class="icon-button mobile-close" id="closeSidebar" type="button" aria-label="关闭菜单">
             <i data-lucide="x"></i>
@@ -61,6 +61,14 @@
         </nav>
 
         <div class="sidebar-divider"></div>
+        <div class="nav-label">研发</div>
+        <a class="nav-item" data-view="dashboard" href="#/dashboard">
+          <span class="nav-icon"><i data-lucide="layout-dashboard"></i></span>
+          <span>研发驾驶舱</span>
+          <span class="nav-count" data-count="projects">0</span>
+        </a>
+
+        <div class="sidebar-divider"></div>
         <div class="nav-label">节奏</div>
         <a class="nav-item" data-view="weekly" href="#/weekly">
           <span class="nav-icon"><i data-lucide="calendar-days"></i></span>
@@ -81,7 +89,7 @@
 
       <main class="main-area">
         <header class="topbar">
-          <button class="icon-button menu-button" id="openSidebar" type="button" aria-label="打开菜单">
+          <button class="icon-button menu-button" id="openSidebar" type="button" aria-label="打开菜单" aria-controls="sidebar" aria-expanded="false">
             <i data-lucide="menu"></i>
           </button>
           <div class="breadcrumb"><span>我的工作区</span><i data-lucide="chevron-right"></i><strong id="breadcrumbTitle">全部想法</strong></div>
@@ -129,6 +137,6 @@
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260803-node-sort-v2"></script>
+    <script src="app.js?v=20260815-ideas-2-foundation"></script>
   </body>
 </html>

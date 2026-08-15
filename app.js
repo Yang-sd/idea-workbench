@@ -2,7 +2,8 @@
   'use strict';
 
   const STORAGE_KEY = 'idea-desk-v1';
-  const ROUTES = ['all', 'inbox', 'try', 'later', 'done', 'weekly'];
+  const STATE_VERSION = 4;
+  const ROUTES = ['all', 'inbox', 'try', 'later', 'done', 'dashboard', 'weekly'];
   const STATUS_LABELS = { inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成' };
   const EXPERIMENT_LABELS = { not_started: '还没开始', in_progress: '进行中', completed: '已完成' };
   const NODE_STATUS_LABELS = { not_started: '未开始', in_progress: '进行中', completed: '已完成' };
@@ -120,38 +121,150 @@
     ];
   }
 
+  function textValue(value, fallback) {
+    if (typeof value === 'string') return value;
+    if (value === null || value === undefined) return fallback || '';
+    return String(value);
+  }
+
+  function timestampValue(value, fallback) {
+    if (!value) return fallback;
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : fallback;
+  }
+
+  function scoreValue(value) {
+    return Math.max(1, Math.min(5, Number(value) || 3));
+  }
+
+  function normalizeFile(file, prefix) {
+    const source = file && typeof file === 'object' ? file : {};
+    return {
+      ...source,
+      id: textValue(source.id) || prefix + '-' + uid(),
+      name: textValue(source.name, '未命名资料'),
+      url: textValue(source.url),
+      type: textValue(source.type),
+      size: Math.max(0, Number(source.size) || 0),
+      uploadedAt: timestampValue(source.uploadedAt, new Date().toISOString())
+    };
+  }
+
+  function normalizeNode(node, index) {
+    const source = node && typeof node === 'object' ? node : {};
+    const now = new Date().toISOString();
+    const status = NODE_STATUS_LABELS[source.status] ? source.status : 'not_started';
+    return {
+      ...source,
+      id: textValue(source.id) || 'node-' + uid(),
+      code: textValue(source.code, 'P-' + String(index + 1).padStart(3, '0')),
+      title: textValue(source.title, '未命名节点'),
+      content: textValue(source.content),
+      status,
+      attachments: Array.isArray(source.attachments) ? source.attachments.map((file) => normalizeFile(file, 'attachment')) : [],
+      children: Array.isArray(source.children) ? source.children.map((child, childIndex) => normalizeNode(child, childIndex)) : [],
+      createdAt: timestampValue(source.createdAt, now),
+      updatedAt: timestampValue(source.updatedAt, now)
+    };
+  }
+
+  function normalizeIdea(idea, index) {
+    const source = idea && typeof idea === 'object' ? idea : {};
+    const now = new Date().toISOString();
+    const rawTags = Array.isArray(source.tags) ? source.tags : textValue(source.tags).split(',');
+    const status = STATUS_LABELS[source.status] ? source.status : 'inbox';
+    const experimentStatus = EXPERIMENT_LABELS[source.experimentStatus] ? source.experimentStatus : 'not_started';
+    const normalized = {
+      ...source,
+      id: textValue(source.id) || 'idea-' + (index + 1) + '-' + uid(),
+      title: textValue(source.title, '未命名想法'),
+      problem: textValue(source.problem),
+      audience: textValue(source.audience),
+      mvp: textValue(source.mvp),
+      nextAction: textValue(source.nextAction),
+      finishLine: textValue(source.finishLine),
+      status,
+      tags: rawTags.map((tag) => textValue(tag).trim()).filter(Boolean).slice(0, 8),
+      interest: scoreValue(source.interest),
+      value: scoreValue(source.value),
+      ease: scoreValue(source.ease),
+      experimentStatus,
+      experimentGoal: textValue(source.experimentGoal),
+      experimentResult: textValue(source.experimentResult),
+      files: Array.isArray(source.files) ? source.files.map((file) => normalizeFile(file, 'file')) : [],
+      nodes: Array.isArray(source.nodes) ? source.nodes.map((node, nodeIndex) => normalizeNode(node, nodeIndex)) : [],
+      createdAt: timestampValue(source.createdAt, now),
+      updatedAt: timestampValue(source.updatedAt, now)
+    };
+    normalized.currentNodeId = findProjectNode(normalized, textValue(source.currentNodeId))?.id || null;
+    return normalized;
+  }
+
+  function normalizeState(source) {
+    const input = source && typeof source === 'object' ? source : {};
+    const ideas = (Array.isArray(input.ideas) ? input.ideas : seedIdeas()).map(normalizeIdea);
+    const requestedFocus = textValue(input.focusId);
+    const focusId = ideas.some((idea) => idea.id === requestedFocus && idea.status === 'try')
+      ? requestedFocus
+      : ideas.find((idea) => idea.status === 'try')?.id || null;
+    const review = input.review && typeof input.review === 'object' && !Array.isArray(input.review) ? input.review : {};
+    return {
+      revision: Number.isInteger(input.revision) && input.revision >= 0 ? input.revision : 0,
+      ideas,
+      focusId,
+      review: {
+        ...review,
+        wins: textValue(review.wins),
+        learnings: textValue(review.learnings),
+        next: textValue(review.next)
+      }
+    };
+  }
+
   function loadLocalData() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return { ideas: seedIdeas(), focusId: 'idea-1', review: {} };
+      if (!raw) return normalizeState({ ideas: seedIdeas(), focusId: 'idea-1', review: {} });
       const parsed = JSON.parse(raw);
       if (!parsed || !Array.isArray(parsed.ideas)) throw new Error('invalid data');
-      return {
-        ideas: parsed.ideas,
-        focusId: parsed.focusId || parsed.ideas.find((idea) => idea.status === 'try')?.id || null,
-        review: parsed.review || {}
-      };
+      return normalizeState(parsed);
     } catch (error) {
-      return { ideas: seedIdeas(), focusId: 'idea-1', review: {} };
+      return normalizeState({ ideas: seedIdeas(), focusId: 'idea-1', review: {} });
     }
   }
 
   function dataPayload(source) {
     return {
-      version: 3,
+      version: STATE_VERSION,
+      schemaVersion: STATE_VERSION,
+      revision: Number(source.revision) || 0,
       ideas: source.ideas,
       focusId: source.focusId,
       review: source.review
     };
   }
 
-  async function writeRemoteData(payload) {
+  class StateConflictError extends Error {
+    constructor(currentRevision) {
+      super('state revision conflict');
+      this.name = 'StateConflictError';
+      this.currentRevision = currentRevision;
+    }
+  }
+
+  async function writeRemoteData(payload, expectedRevision) {
     const response = await fetch('/api/state', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'If-Match': '"' + String(expectedRevision) + '"'
+      },
       body: JSON.stringify(payload)
     });
+    const result = await response.json().catch(() => ({}));
+    if (response.status === 409) throw new StateConflictError(Number(result.currentRevision) || 0);
     if (!response.ok) throw new Error('remote write failed');
+    return result;
   }
 
   async function loadData() {
@@ -161,22 +274,18 @@
       if (response.ok) {
         const parsed = await response.json();
         if (!parsed || !Array.isArray(parsed.ideas)) throw new Error('invalid remote state');
-        const normalized = {
-          ideas: parsed.ideas,
-          focusId: parsed.focusId || parsed.ideas.find((idea) => idea.status === 'try')?.id || null,
-          review: parsed.review || {}
-        };
+        const normalized = normalizeState(parsed);
+        const upgraded = Number(parsed.version) !== STATE_VERSION;
         let renumbered = false;
         normalized.ideas.forEach((idea) => {
           if (renumberProjectNodes(idea)) renumbered = true;
         });
-        if (renumbered) await writeRemoteData(dataPayload(normalized));
-        return { ...normalized, persistence: 'nas', renumbered };
+        return { ...normalized, persistence: 'nas', renumbered, upgraded, upgradePending: renumbered || upgraded };
       }
       if (response.status !== 404) throw new Error('remote read failed');
       local.ideas.forEach((idea) => renumberProjectNodes(idea));
-      await writeRemoteData(dataPayload(local));
-      return { ...local, persistence: 'nas', migrated: true };
+      const result = await writeRemoteData(dataPayload(local), 0);
+      return { ...local, revision: Number(result.revision) || 1, persistence: 'nas', migrated: true };
     } catch (error) {
       return { ...local, persistence: 'local' };
     }
@@ -187,6 +296,7 @@
     ideas: initial.ideas,
     focusId: initial.focusId,
     review: initial.review,
+    revision: initial.revision,
     persistence: 'local',
     route: { page: 'all', id: null },
     query: '',
@@ -239,16 +349,27 @@
     if (status) status.textContent = message || (state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机');
     window.clearTimeout(saveData.timer);
     saveData.timer = window.setTimeout(() => {
-      if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
+      if (!status) return;
+      if (state.persistence === 'conflict') status.textContent = '检测到数据冲突';
+      else status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
     }, 1800);
     saveQueue = saveQueue.then(async () => {
+      if (state.persistence === 'conflict') return;
       try {
-        await writeRemoteData(payload);
+        const result = await writeRemoteData(payload, state.revision);
+        state.revision = Number(result.revision) || state.revision + 1;
         state.persistence = 'nas';
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(dataPayload(state)));
       } catch (error) {
-        state.persistence = 'local';
-        if (status) status.textContent = '仅保存在本机';
-        showToast('NAS 暂时不可用，已保存在本机');
+        if (error instanceof StateConflictError) {
+          state.persistence = 'conflict';
+          if (status) status.textContent = '检测到数据冲突';
+          showToast('NAS 上有更新版本，请刷新页面后继续');
+        } else {
+          state.persistence = 'local';
+          if (status) status.textContent = '仅保存在本机';
+          showToast('NAS 暂时不可用，已保存在本机');
+        }
       }
     });
   }
@@ -431,14 +552,80 @@
     };
   }
 
-  function projectNodeStats(idea) {
+  function nodeListStats(nodes) {
     const stats = { total: 0, completed: 0, inProgress: 0 };
-    walkProjectNodes(projectNodesOf(idea), (node) => {
+    walkProjectNodes(nodes, (node) => {
       stats.total += 1;
       if (node.status === 'completed') stats.completed += 1;
       if (node.status === 'in_progress') stats.inProgress += 1;
     });
+    stats.percent = stats.total ? Math.round((stats.completed / stats.total) * 100) : 0;
     return stats;
+  }
+
+  function projectNodeStats(idea) {
+    return nodeListStats(projectNodesOf(idea));
+  }
+
+  function nodeContains(root, nodeId) {
+    if (!root || !nodeId) return false;
+    if (root.id === nodeId) return true;
+    return (root.children || []).some((child) => nodeContains(child, nodeId));
+  }
+
+  function currentProjectStage(idea) {
+    return projectNodesOf(idea).find((root) => nodeContains(root, idea.currentNodeId)) || null;
+  }
+
+  function projectIdeas() {
+    return state.ideas.filter((idea) => projectNodesOf(idea).length || projectFilesOf(idea).length);
+  }
+
+  function projectReadiness(idea) {
+    const checks = [
+      { key: 'problem', label: '问题定义', passed: Boolean(idea.problem.trim()), blocking: true },
+      { key: 'audience', label: '目标用户', passed: Boolean(idea.audience.trim()), blocking: false },
+      { key: 'mvp', label: '最小版本', passed: Boolean(idea.mvp.trim()), blocking: true },
+      { key: 'experiment', label: '验证目标', passed: Boolean(idea.experimentGoal.trim()), blocking: false },
+      { key: 'finish', label: '完成线', passed: Boolean(idea.finishLine.trim()), blocking: false },
+      { key: 'files', label: '项目资料', passed: projectFilesOf(idea).length > 0, blocking: false },
+      { key: 'nodes', label: '执行节点', passed: projectNodeStats(idea).total > 0, blocking: true },
+      { key: 'current', label: '当前节点', passed: Boolean(findProjectNode(idea, idea.currentNodeId)), blocking: true },
+      { key: 'next', label: '下一步动作', passed: Boolean(idea.nextAction.trim()), blocking: false }
+    ];
+    const passed = checks.filter((check) => check.passed).length;
+    const missing = checks.filter((check) => !check.passed);
+    const status = missing.some((check) => check.blocking) ? 'blocked' : missing.length ? 'warning' : 'pass';
+    return { checks, missing, passed, status, percent: Math.round((passed / checks.length) * 100) };
+  }
+
+  function readinessStatusMarkup(readiness) {
+    const labels = { pass: 'PASS', warning: 'WARNING', blocked: 'BLOCKED' };
+    const icons = { pass: 'badge-check', warning: 'triangle-alert', blocked: 'circle-x' };
+    return '<span class="readiness-status ' + readiness.status + '"><i data-lucide="' + icons[readiness.status] + '"></i>' + labels[readiness.status] + '</span>';
+  }
+
+  function projectCockpitMarkup(idea) {
+    const stats = projectNodeStats(idea);
+    const readiness = projectReadiness(idea);
+    const currentNode = findProjectNode(idea, idea.currentNodeId);
+    const currentStage = currentProjectStage(idea);
+    const stages = projectNodesOf(idea).map((stage) => {
+      const stageStats = nodeListStats([stage]);
+      const current = currentStage?.id === stage.id;
+      return '<button class="phase-step' + (current ? ' is-current' : '') + (stageStats.percent === 100 ? ' is-complete' : '') + '" data-action="open-stage" data-id="' + escapeHTML(idea.id) + '" data-node-id="' + escapeHTML(stage.id) + '" type="button"><span class="phase-step-code">' + escapeHTML(stage.code) + '</span><span class="phase-step-main"><strong>' + escapeHTML(stage.title) + '</strong><small>' + stageStats.completed + ' / ' + stageStats.total + ' 完成</small></span><span class="phase-step-progress"><i style="width:' + stageStats.percent + '%"></i></span></button>';
+    }).join('');
+    const checks = readiness.checks.map((check) =>
+      '<span class="preflight-check ' + (check.passed ? 'is-ready' : 'is-missing') + '"><i data-lucide="' + (check.passed ? 'check' : 'minus') + '"></i>' + escapeHTML(check.label) + '</span>'
+    ).join('');
+    const missingCopy = readiness.missing.length
+      ? '还缺：' + readiness.missing.map((check) => check.label).join('、')
+      : '现有项目信息已覆盖全部基础检查项。';
+    return '<section class="project-cockpit" aria-labelledby="projectCockpitTitle"><div class="project-cockpit-head"><div><p class="eyebrow">IDEAS 2.0 · PROJECT CONTROL</p><h2 id="projectCockpitTitle">项目驾驶舱</h2><p>从现有资料和节点实时计算，不改变项目原始数据。</p></div>' + readinessStatusMarkup(readiness) + '</div>' +
+      '<div class="cockpit-metrics"><div><span>交付进度</span><strong>' + stats.percent + '%</strong><small>' + stats.completed + ' / ' + stats.total + ' 节点</small></div><div><span>当前阶段</span><strong>' + escapeHTML(currentStage?.code || '未指定') + '</strong><small>' + escapeHTML(currentStage?.title || '请选择执行节点') + '</small></div><div><span>准备度</span><strong>' + readiness.percent + '%</strong><small>' + readiness.passed + ' / ' + readiness.checks.length + ' 项</small></div><div><span>项目资料</span><strong>' + projectFilesOf(idea).length + '</strong><small>文档与附件</small></div></div>' +
+      (currentNode ? '<div class="cockpit-current"><span><i data-lucide="circle-dot"></i>当前执行</span><strong>' + escapeHTML(currentNode.code + ' · ' + currentNode.title) + '</strong><small>' + escapeHTML(idea.nextAction || autoNodeAction(currentNode)) + '</small></div>' : '<div class="cockpit-current is-empty"><span><i data-lucide="circle-dashed"></i>当前执行</span><strong>还没有指定节点</strong><small>从下方节点树选择一个当前执行项。</small></div>') +
+      (stages ? '<div class="phase-rail" aria-label="项目阶段">' + stages + '</div>' : '') +
+      '<div class="preflight-preview"><div class="preflight-preview-head"><div><span>准备度检查预览</span><small>' + escapeHTML(missingCopy) + '</small></div><strong>' + readiness.percent + '%</strong></div><div class="preflight-checks">' + checks + '</div></div></section>';
   }
 
   function removeProjectNode(nodes, nodeId) {
@@ -464,7 +651,7 @@
       '<option value="' + status + '"' + (node.status === status ? ' selected' : '') + '>' + label + '</option>'
     ).join('');
     const attachments = node.attachments.map((attachment) => projectNodeAttachmentMarkup(idea, node, attachment)).join('');
-    const children = node.children.map((child) => projectNodeMarkup(idea, child, node.id)).join('');
+    const children = expanded ? node.children.map((child) => projectNodeMarkup(idea, child, node.id)).join('') : '';
     return '<article class="project-node node-status-' + (node.status || 'not_started') + (current ? ' is-current' : '') + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" data-node-code="' + escapeHTML(node.code) + '">' +
       '<div class="project-node-row"><button class="node-drag-handle" data-node-drag data-id="' + idea.id + '" data-node-id="' + node.id + '" data-parent-node-id="' + (parentNodeId || '') + '" type="button" aria-label="上下拖动 ' + escapeHTML(node.code) + '" data-tooltip="拖动排序"><i data-lucide="grip-vertical"></i></button><button class="node-toggle" data-action="toggle-node" data-node-id="' + node.id + '" type="button" aria-label="' + (expanded ? '收起' : '展开') + escapeHTML(node.code) + '"><i data-lucide="chevron-' + (expanded ? 'down' : 'right') + '"></i></button><span class="node-code">' + escapeHTML(node.code) + '</span><input class="node-title-input" data-node-field="title" data-id="' + idea.id + '" data-node-id="' + node.id + '" value="' + escapeHTML(node.title || '') + '" maxlength="160" aria-label="' + escapeHTML(node.code) + ' 节点标题" /><select class="node-status-select" data-node-field="status" data-id="' + idea.id + '" data-node-id="' + node.id + '" aria-label="' + escapeHTML(node.code) + ' 节点状态">' + statusOptions + '</select><span class="node-child-count">' + node.children.length + ' 子节点</span><button class="node-icon-button current-node-button' + (current ? ' is-active' : '') + '" data-action="set-current-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="' + (current ? '取消当前执行节点' : '设为当前执行节点') + '" data-tooltip="' + (current ? '取消当前节点' : '设为当前节点') + '"><i data-lucide="' + (current ? 'circle-dot' : 'circle') + '"></i></button><button class="node-icon-button add-child-button" data-action="add-child-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="添加子节点" data-tooltip="添加子节点"><i data-lucide="list-plus"></i></button><button class="node-icon-button danger" data-action="delete-node" data-id="' + idea.id + '" data-node-id="' + node.id + '" type="button" aria-label="删除节点" data-tooltip="删除节点"><i data-lucide="trash-2"></i></button></div>' +
       '<div class="project-node-expanded"' + (expanded ? '' : ' hidden') + '><div class="project-node-body"><label><span>节点记录</span><textarea data-node-field="content" data-id="' + idea.id + '" data-node-id="' + node.id + '" rows="3" placeholder="记录说明、执行结果、AI 处理备注等">' + escapeHTML(node.content || '') + '</textarea></label><div class="node-attachments"><div class="node-attachments-head"><span>截图与图片</span><label class="node-upload-button"><i data-lucide="image-plus"></i>添加截图<input data-node-upload data-id="' + idea.id + '" data-node-id="' + node.id + '" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden /></label></div><div class="node-attachment-grid">' + (attachments || '<span class="node-attachment-empty">还没有截图</span>') + '</div></div></div>' +
@@ -578,6 +765,31 @@
       '<div id="allResults">' + allResultsMarkup() + '</div></section>';
   }
 
+  function dashboardProjectMarkup(idea) {
+    const stats = projectNodeStats(idea);
+    const readiness = projectReadiness(idea);
+    const currentNode = findProjectNode(idea, idea.currentNodeId);
+    const stage = currentProjectStage(idea);
+    return '<article class="dashboard-project-row"><button class="dashboard-project-main" data-action="open-idea" data-id="' + escapeHTML(idea.id) + '" type="button"><span class="dashboard-project-status ' + escapeHTML(idea.status) + '"></span><span class="dashboard-project-copy"><span class="dashboard-project-title"><strong>' + escapeHTML(idea.title) + '</strong>' + statusPill(idea) + '</span><small>' + escapeHTML(currentNode ? currentNode.code + ' · ' + currentNode.title : '尚未指定当前执行节点') + '</small></span></button><div class="dashboard-project-stage"><span>当前阶段</span><strong>' + escapeHTML(stage?.code || '—') + '</strong><small>' + escapeHTML(stage?.title || '未开始') + '</small></div><div class="dashboard-project-progress"><span><small>节点进度</small><strong>' + stats.percent + '%</strong></span><div><i style="width:' + stats.percent + '%"></i></div><small>' + stats.completed + ' / ' + stats.total + '</small></div><div class="dashboard-project-readiness"><small>准备度</small>' + readinessStatusMarkup(readiness) + '<span>' + readiness.percent + '%</span></div><button class="icon-button" data-action="open-idea" data-id="' + escapeHTML(idea.id) + '" type="button" aria-label="打开项目：' + escapeHTML(idea.title) + '"><i data-lucide="arrow-right"></i></button></article>';
+  }
+
+  function renderDashboardPage() {
+    const projects = projectIdeas().sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
+    const totals = projects.reduce((summary, idea) => {
+      const stats = projectNodeStats(idea);
+      summary.nodes += stats.total;
+      summary.completed += stats.completed;
+      summary.inProgress += stats.inProgress;
+      if (projectReadiness(idea).status === 'pass') summary.ready += 1;
+      return summary;
+    }, { nodes: 0, completed: 0, inProgress: 0, ready: 0 });
+    const overall = totals.nodes ? Math.round((totals.completed / totals.nodes) * 100) : 0;
+    const rows = projects.map(dashboardProjectMarkup).join('');
+    return pageHeader('PRODUCT DEVELOPMENT OS', '研发驾驶舱', '把项目准备度、当前阶段和交付进度放在同一张工作视图里。', '<button class="button primary-button" data-action="capture" type="button"><i data-lucide="plus"></i>新项目想法</button>') +
+      '<section class="dashboard-metrics" aria-label="研发概览"><div><span>项目</span><strong>' + projects.length + '</strong><small>含资料或执行节点</small></div><div><span>总体进度</span><strong>' + overall + '%</strong><small>' + totals.completed + ' / ' + totals.nodes + ' 节点</small></div><div><span>进行中节点</span><strong>' + totals.inProgress + '</strong><small>需要持续推进</small></div><div><span>基础检查通过</span><strong>' + totals.ready + '</strong><small>准备度预览 PASS</small></div></section>' +
+      '<section class="dashboard-flow"><div class="section-heading"><div><h2>项目执行流</h2><p>优先处理有当前节点但仍有准备度缺项的项目。</p></div><span class="title-count">' + projects.length + '</span></div><div class="dashboard-project-list">' + (rows || emptyState('layout-dashboard', '还没有研发项目', '为想法添加项目资料或执行节点后，它会进入驾驶舱。', '<button class="button primary-button" data-action="capture" type="button"><i data-lucide="plus"></i>记录项目想法</button>')) + '</div></section>';
+  }
+
   function renderInboxPage() {
     const ideas = state.ideas.filter((idea) => idea.status === 'inbox').sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     const list = ideas.length ? ideas.map((idea) =>
@@ -655,6 +867,7 @@
     const isFocused = state.focusId === idea.id && idea.status === 'try';
     return '<a class="back-link" href="#/' + idea.status + '"><i data-lucide="arrow-left"></i>返回' + STATUS_LABELS[idea.status] + '</a>' +
       '<section class="detail-page-head"><div><div class="detail-page-meta">' + statusPill(idea) + '<span>更新于 ' + formatRelative(idea.updatedAt) + '</span></div><h1>' + escapeHTML(idea.title) + '</h1><p>在一个页面里完成判断、计划和实验记录。</p></div><button class="icon-button danger-icon" data-action="delete" data-id="' + idea.id + '" type="button" aria-label="删除这个想法"><i data-lucide="trash-2"></i></button></section>' +
+      projectCockpitMarkup(idea) +
       '<form id="detailForm" data-id="' + idea.id + '"><div class="editor-layout"><div class="editor-main">' +
       '<section class="editor-section"><div class="editor-section-head"><span>01</span><div><h2>想法本身</h2><p>先说清楚问题和最小版本。</p></div></div><div class="field-group"><label class="field-label" for="detailTitle">想法标题 <span>*</span></label><input class="text-input input-large" id="detailTitle" name="title" value="' + escapeHTML(idea.title) + '" maxlength="80" required /></div><div class="field-group"><label class="field-label" for="detailProblem">它在解决什么问题</label><textarea class="text-input" id="detailProblem" name="problem" rows="4">' + escapeHTML(idea.problem) + '</textarea></div><div class="form-row"><div><label class="field-label" for="detailAudience">可能会需要的人</label><textarea class="text-input" id="detailAudience" name="audience" rows="3">' + escapeHTML(idea.audience) + '</textarea></div><div><label class="field-label" for="detailMvp">我能做出的最小版本</label><textarea class="text-input" id="detailMvp" name="mvp" rows="3">' + escapeHTML(idea.mvp) + '</textarea></div></div></section>' + projectMaterialsMarkup(idea) +
       '</div>' +
@@ -668,21 +881,57 @@
     const detailIdea = route.page === 'idea' ? ideaById(route.id) : null;
     const active = detailIdea ? detailIdea.status : route.page;
     const title = detailIdea ? STATUS_LABELS[detailIdea.status] + ' / 想法详情' : {
-      all: '全部想法', inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成', weekly: '本周复盘'
+      all: '全部想法', inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成', dashboard: '研发驾驶舱', weekly: '本周复盘'
     }[route.page];
     $$('.nav-item[data-view]').forEach((item) => item.classList.toggle('is-active', item.dataset.view === active));
     $$('[data-count]').forEach((count) => {
-      count.textContent = count.dataset.count === 'all' ? state.ideas.length : statusCount(count.dataset.count);
+      if (count.dataset.count === 'all') count.textContent = state.ideas.length;
+      else if (count.dataset.count === 'projects') count.textContent = projectIdeas().length;
+      else count.textContent = statusCount(count.dataset.count);
     });
     $('#breadcrumbTitle').textContent = title || '全部想法';
-    document.title = (title || '全部想法') + ' · 想法台';
+    document.title = (title || '全部想法') + ' · Ideas 2.0';
   }
 
   function renderIcons() {
     if (window.lucide && typeof window.lucide.createIcons === 'function') window.lucide.createIcons();
   }
 
-  function renderApp() {
+  const DETAIL_DRAFT_FIELDS = ['title', 'problem', 'audience', 'mvp', 'nextAction', 'finishLine', 'currentNodeId', 'status', 'tags', 'interest', 'value', 'ease', 'experimentStatus', 'experimentGoal', 'experimentResult'];
+
+  function captureDetailDraft() {
+    const form = $('#detailForm');
+    if (!form) return null;
+    const values = {};
+    DETAIL_DRAFT_FIELDS.forEach((name) => {
+      const control = form.elements.namedItem(name);
+      if (control && 'value' in control) values[name] = control.value;
+    });
+    return { ideaId: form.dataset.id, values };
+  }
+
+  function restoreDetailDraft(draft, overrides) {
+    const form = $('#detailForm');
+    if (!draft || !form || form.dataset.id !== draft.ideaId) return;
+    const values = { ...draft.values, ...(overrides || {}) };
+    Object.entries(values).forEach(([name, value]) => {
+      const control = form.elements.namedItem(name);
+      if (control && 'value' in control) control.value = value;
+    });
+    ['interest', 'value', 'ease'].forEach((name) => {
+      const output = $('#' + name + 'Output');
+      if (output && values[name] !== undefined) output.value = values[name];
+    });
+    const score = $('#detailScore');
+    if (score) {
+      const preview = scoreOf({ interest: values.interest, value: values.value, ease: values.ease });
+      score.innerHTML = preview + '<small>/10</small>';
+    }
+  }
+
+  function renderApp(options) {
+    const settings = options || {};
+    const draft = settings.preserveDetailDraft === false ? null : captureDetailDraft();
     const container = $('#pageContent');
     const route = state.route;
     let markup = '';
@@ -697,21 +946,85 @@
     else if (route.page === 'try') markup = renderTryPage();
     else if (route.page === 'later') markup = renderLaterPage();
     else if (route.page === 'done') markup = renderDonePage();
+    else if (route.page === 'dashboard') markup = renderDashboardPage();
     else if (route.page === 'weekly') markup = renderWeeklyPage();
     else markup = renderAllPage();
     container.innerHTML = markup;
     renderNavigation();
     renderIcons();
+    restoreDetailDraft(draft, settings.draftOverrides);
+  }
+
+  let modalReturnFocus = null;
+  const mobileSidebarQuery = window.matchMedia('(max-width: 1010px)');
+
+  function focusableElements(container) {
+    return $$('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])', container)
+      .filter((element) => !element.hidden && element.getClientRects().length > 0);
+  }
+
+  function trapModalFocus(event, modal) {
+    if (event.key !== 'Tab') return false;
+    const focusable = focusableElements(modal);
+    if (!focusable.length) return false;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+      return true;
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+      return true;
+    }
+    return false;
+  }
+
+  function syncMobileSidebar(open, restoreFocus) {
+    const sidebar = $('#sidebar');
+    const main = $('.main-area');
+    const mobile = mobileSidebarQuery.matches;
+    const shouldOpen = mobile && Boolean(open);
+    sidebar.classList.toggle('is-open', shouldOpen);
+    sidebar.inert = mobile && !shouldOpen;
+    main.inert = shouldOpen;
+    $('#openSidebar').setAttribute('aria-expanded', String(shouldOpen));
+    if (shouldOpen) $('#closeSidebar').focus();
+    else if (restoreFocus) $('#openSidebar').focus();
+  }
+
+  function openModal(modal, initialFocus) {
+    modalReturnFocus = document.activeElement;
+    modal.hidden = false;
+    $('.app-shell').inert = true;
+    window.setTimeout(() => initialFocus?.focus(), 0);
+  }
+
+  function closeModal(modal, restoreFocus) {
+    modal.hidden = true;
+    $('.app-shell').inert = false;
+    syncMobileSidebar($('#sidebar').classList.contains('is-open'), false);
+    if (restoreFocus && modalReturnFocus instanceof HTMLElement) modalReturnFocus.focus();
+    modalReturnFocus = null;
   }
 
   function openCapture() {
-    $('#captureModal').hidden = false;
-    $('#captureTitleInput').focus();
+    openModal($('#captureModal'), $('#captureTitleInput'));
   }
 
   function closeCapture() {
-    $('#captureModal').hidden = true;
+    closeModal($('#captureModal'), true);
     $('#captureForm').reset();
+  }
+
+  function openShortcuts() {
+    openModal($('#shortcutsModal'), $('#closeShortcuts'));
+  }
+
+  function closeShortcuts() {
+    closeModal($('#shortcutsModal'), true);
   }
 
   function showToast(message) {
@@ -819,7 +1132,7 @@
     if (!willClear) idea.nextAction = autoNodeAction(node);
     idea.updatedAt = new Date().toISOString();
     saveData(willClear ? '已取消当前执行节点' : '已设置当前执行节点');
-    renderApp();
+    renderApp({ draftOverrides: { currentNodeId: idea.currentNodeId || '', nextAction: idea.nextAction } });
     showToast(willClear ? '已取消当前执行节点' : node.code + ' 已设为下一步');
   }
 
@@ -844,7 +1157,7 @@
     renumberProjectNodes(idea, removedCodes);
     idea.updatedAt = new Date().toISOString();
     saveData('已删除项目节点');
-    renderApp();
+    renderApp({ draftOverrides: { currentNodeId: idea.currentNodeId || '', nextAction: idea.nextAction } });
     showToast('项目节点已删除');
   }
 
@@ -1224,7 +1537,7 @@
   }
 
   function exportData() {
-    const payload = JSON.stringify({ version: 3, exportedAt: new Date().toISOString(), ideas: state.ideas, focusId: state.focusId, review: state.review }, null, 2);
+    const payload = JSON.stringify({ ...dataPayload(state), exportedAt: new Date().toISOString() }, null, 2);
     const blob = new Blob([payload], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1242,9 +1555,10 @@
       try {
         const parsed = JSON.parse(reader.result);
         if (!parsed || !Array.isArray(parsed.ideas)) throw new Error('invalid');
-        state.ideas = parsed.ideas;
-        state.focusId = parsed.focusId || state.ideas.find((idea) => idea.status === 'try')?.id || null;
-        state.review = parsed.review || {};
+        const normalized = normalizeState(parsed);
+        state.ideas = normalized.ideas;
+        state.focusId = normalized.focusId;
+        state.review = normalized.review;
         saveData('已导入备份');
         renderApp();
         showToast('已恢复 ' + state.ideas.length + ' 个想法');
@@ -1292,6 +1606,14 @@
         else projectUi.expandedNodes.add(action.dataset.nodeId);
         renderApp();
       }
+      if (type === 'open-stage') {
+        projectUi.expandedNodes.add(action.dataset.nodeId);
+        renderApp();
+        window.setTimeout(() => {
+          const target = $$('.project-node[data-node-id]').find((element) => element.dataset.nodeId === action.dataset.nodeId);
+          target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 0);
+      }
       if (type === 'add-root-node') addProjectNode(id, null);
       if (type === 'add-child-node') addProjectNode(id, action.dataset.nodeId);
       if (type === 'set-current-node') setCurrentProjectNode(id, action.dataset.nodeId);
@@ -1326,6 +1648,8 @@
 
     $('#pageContent').addEventListener('keydown', (event) => {
       const target = event.target.closest('[data-action="open-idea"]');
+      const interactive = event.target.closest('button, a, input, textarea, select');
+      if (interactive && interactive !== target) return;
       if (target && (event.key === 'Enter' || event.key === ' ')) {
         event.preventDefault();
         navigate('idea/' + encodeURIComponent(target.dataset.id));
@@ -1422,13 +1746,15 @@
       uploadProjectFiles(dropZone.dataset.id, event.dataTransfer?.files);
     });
 
-    $('#openSidebar').addEventListener('click', () => $('#sidebar').classList.add('is-open'));
-    $('#closeSidebar').addEventListener('click', () => $('#sidebar').classList.remove('is-open'));
-    $('.side-nav').addEventListener('click', () => $('#sidebar').classList.remove('is-open'));
-    $('#helpButton').addEventListener('click', () => { $('#shortcutsModal').hidden = false; });
-    $('#closeShortcuts').addEventListener('click', () => { $('#shortcutsModal').hidden = true; });
+    $('#openSidebar').addEventListener('click', () => syncMobileSidebar(true, false));
+    $('#closeSidebar').addEventListener('click', () => syncMobileSidebar(false, true));
+    $('#sidebar').addEventListener('click', (event) => {
+      if (event.target.closest('a.nav-item')) syncMobileSidebar(false, false);
+    });
+    $('#helpButton').addEventListener('click', openShortcuts);
+    $('#closeShortcuts').addEventListener('click', closeShortcuts);
     $('#shortcutsModal').addEventListener('click', (event) => {
-      if (event.target === $('#shortcutsModal')) $('#shortcutsModal').hidden = true;
+      if (event.target === $('#shortcutsModal')) closeShortcuts();
     });
     $('#exportData').addEventListener('click', exportData);
     $('#importDataButton').addEventListener('click', () => $('#importData').click());
@@ -1441,6 +1767,17 @@
     });
 
     document.addEventListener('keydown', (event) => {
+      const activeModal = !$('#captureModal').hidden ? $('#captureModal') : !$('#shortcutsModal').hidden ? $('#shortcutsModal') : null;
+      if (activeModal && event.key === 'Tab') {
+        trapModalFocus(event, activeModal);
+        return;
+      }
+      if (activeModal && event.key === 'Escape') {
+        event.preventDefault();
+        if (activeModal === $('#captureModal')) closeCapture();
+        else closeShortcuts();
+        return;
+      }
       const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
         const form = $('#detailForm');
@@ -1451,10 +1788,11 @@
       }
       if (event.key === 'Escape') {
         if (nodeDrag.pointerId !== null) finishNodeDrag(null, true);
-        if (!$('#captureModal').hidden) closeCapture();
-        if (!$('#shortcutsModal').hidden) $('#shortcutsModal').hidden = true;
-        $('#sidebar').classList.remove('is-open');
-        if (state.route.page === 'idea') {
+        if ($('#sidebar').classList.contains('is-open')) {
+          syncMobileSidebar(false, true);
+          return;
+        }
+        if (state.route.page === 'idea' && !typing) {
           const idea = ideaById(state.route.id);
           if (idea) navigate(idea.status);
         }
@@ -1473,6 +1811,9 @@
         }
       }
     });
+
+    mobileSidebarQuery.addEventListener('change', () => syncMobileSidebar(false, false));
+    syncMobileSidebar(false, false);
   }
 
   async function initializeData() {
@@ -1480,12 +1821,14 @@
     state.ideas = stored.ideas;
     state.focusId = stored.focusId;
     state.review = stored.review;
+    state.revision = stored.revision;
     state.persistence = stored.persistence;
     renderApp();
     const status = $('#saveStatus');
     if (status) status.textContent = state.persistence === 'nas' ? '已保存到 NAS' : '仅保存在本机';
     if (stored.migrated) showToast('本机数据已同步到 NAS');
     else if (stored.renumbered) showToast('项目节点编号已自动整理');
+    else if (stored.upgradePending) showToast('数据已兼容 Ideas 2.0，将在下次保存时升级');
   }
 
   bindEvents();
