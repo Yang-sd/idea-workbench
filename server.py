@@ -1,13 +1,20 @@
 import base64
+import copy
+import html as html_module
 import hmac
 import json
 import os
 import re
+import smtplib
+import socket
 import shutil
+import ssl
 import tempfile
 import threading
+import time as time_module
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from email.message import EmailMessage
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -52,6 +59,7 @@ EXPERIMENT_STATUSES = {'not_started', 'in_progress', 'completed'}
 MAX_IDEAS = 5000
 MAX_NODES = 50000
 MAX_NODE_DEPTH = 12
+STATE_VERSION = 5
 STATIC_FILES = {
     '/': ('index.html', 'text/html; charset=utf-8'),
     '/index.html': ('index.html', 'text/html; charset=utf-8'),
@@ -62,11 +70,52 @@ AUTH_USERNAME = os.environ.get('IDEA_DESK_USERNAME', '')
 AUTH_PASSWORD = os.environ.get('IDEA_DESK_PASSWORD', '')
 AUTH_REQUIRED = os.environ.get('IDEA_DESK_REQUIRE_AUTH', '').lower() in {'1', 'true', 'yes'}
 STATE_LOCK = threading.RLock()
+WEEKLY_RUN_LOCK = threading.Lock()
+WEEKLY_STOP_EVENT = threading.Event()
+WEEKLY_TIMEZONE = timezone(timedelta(hours=8), name='Asia/Shanghai')
+WEEKLY_REPORT_LIMIT = 52
+WEEKLY_ITEM_LIMIT = 100
+WEEKLY_PROJECT_LIMIT = 100
+WEEKLY_REPORT_STATUSES = {'pending', 'sent', 'failed'}
+
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    return default if value is None else value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def env_integer(name, default, minimum, maximum):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+WEEKLY_REPORT_ENABLED = env_flag('IDEA_DESK_WEEKLY_REPORT_ENABLED')
+WEEKLY_MAX_ATTEMPTS = env_integer('IDEA_DESK_WEEKLY_MAX_ATTEMPTS', 3, 1, 5)
+WEEKLY_RETRY_SECONDS = env_integer('IDEA_DESK_WEEKLY_RETRY_SECONDS', 300, 0, 3600)
+SMTP_SECURITY = os.environ.get('IDEA_DESK_SMTP_SECURITY', 'starttls').strip().lower()
+SMTP_HOST = os.environ.get('IDEA_DESK_SMTP_HOST', '').strip()
+SMTP_PORT = env_integer('IDEA_DESK_SMTP_PORT', 465 if SMTP_SECURITY == 'ssl' else 587, 1, 65535)
+SMTP_USERNAME = os.environ.get('IDEA_DESK_SMTP_USERNAME', '')
+SMTP_PASSWORD = os.environ.get('IDEA_DESK_SMTP_PASSWORD', '')
+SMTP_FROM = os.environ.get('IDEA_DESK_SMTP_FROM', '').strip()
+SMTP_RECIPIENTS = tuple(
+    address.strip()
+    for address in re.split(r'[,;]', os.environ.get('IDEA_DESK_WEEKLY_RECIPIENTS', ''))
+    if address.strip()
+)
+SMTP_TIMEOUT_SECONDS = env_integer('IDEA_DESK_SMTP_TIMEOUT_SECONDS', 20, 3, 120)
 
 if bool(AUTH_USERNAME) != bool(AUTH_PASSWORD):
     raise RuntimeError('IDEA_DESK_USERNAME and IDEA_DESK_PASSWORD must be configured together')
 if AUTH_REQUIRED and not AUTH_USERNAME:
     raise RuntimeError('Idea Desk authentication is required but credentials are missing')
+if bool(SMTP_USERNAME) != bool(SMTP_PASSWORD):
+    raise RuntimeError('SMTP username and password must be configured together')
+if WEEKLY_REPORT_ENABLED and SMTP_SECURITY not in {'ssl', 'starttls'}:
+    raise RuntimeError('SMTP security must be ssl or starttls')
 
 
 def read_state():
@@ -78,6 +127,12 @@ def read_state():
 def state_revision(payload):
     revision = payload.get('revision', 0) if isinstance(payload, dict) else 0
     return revision if isinstance(revision, int) and revision >= 0 else 0
+
+
+def upgrade_state_version(payload):
+    payload['version'] = STATE_VERSION
+    payload['schemaVersion'] = STATE_VERSION
+    return payload
 
 
 def etag_for_revision(revision):
@@ -126,6 +181,45 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
+def parse_timestamp(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def previous_week_window(now=None):
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(WEEKLY_TIMEZONE)
+    current_monday = local_now.date() - timedelta(days=local_now.weekday())
+    week_end = datetime.combine(current_monday, datetime_time.min, WEEKLY_TIMEZONE)
+    return week_end - timedelta(days=7), week_end
+
+
+def next_weekly_run(now=None):
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_now = current.astimezone(WEEKLY_TIMEZONE)
+    current_monday = local_now.date() - timedelta(days=local_now.weekday())
+    candidate = datetime.combine(current_monday, datetime_time(hour=9), WEEKLY_TIMEZONE)
+    if candidate <= local_now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def timestamp_in_window(value, start, end):
+    parsed = parse_timestamp(value)
+    return parsed is not None and start.astimezone(timezone.utc) <= parsed < end.astimezone(timezone.utc)
+
+
 def find_node(nodes, node_id):
     for node in nodes if isinstance(nodes, list) else []:
         if node.get('id') == node_id:
@@ -151,12 +245,616 @@ def node_progress(nodes):
     return progress
 
 
+def iter_node_paths(nodes, path=()):
+    for node in nodes if isinstance(nodes, list) else []:
+        current_path = path + (node,)
+        yield current_path
+        yield from iter_node_paths(node.get('children'), current_path)
+
+
+def weekly_node_reference(node):
+    if not node:
+        return None
+    return {
+        'id': node.get('id'),
+        'code': node.get('code', ''),
+        'title': node.get('title', ''),
+        'status': node.get('status', 'not_started')
+    }
+
+
+def weekly_idea_item(idea, timestamp):
+    return {
+        'ideaId': idea.get('id'),
+        'title': idea.get('title', ''),
+        'status': idea.get('status'),
+        'timestamp': timestamp
+    }
+
+
+def weekly_completed_node_item(idea, node, timestamp):
+    return {
+        'ideaId': idea.get('id'),
+        'ideaTitle': idea.get('title', ''),
+        'nodeId': node.get('id'),
+        'code': node.get('code', ''),
+        'title': node.get('title', ''),
+        'completedAt': timestamp
+    }
+
+
+def bounded_weekly_items(items, limit=WEEKLY_ITEM_LIMIT):
+    ordered = sorted(items, key=lambda item: (item.get('timestamp') or item.get('completedAt') or '', item.get('ideaId', '')), reverse=True)
+    return ordered[:limit], max(0, len(ordered) - limit)
+
+
+def project_current_context(idea):
+    paths = list(iter_node_paths(idea.get('nodes')))
+    current_node_id = idea.get('currentNodeId')
+    selected_path = next((path for path in paths if path[-1].get('id') == current_node_id), None)
+    source = 'selected'
+    if selected_path is None:
+        selected_path = next((path for path in paths if path[-1].get('status') == 'in_progress'), None)
+        source = 'in_progress' if selected_path else None
+    if not selected_path:
+        return None, None, None
+    return weekly_node_reference(selected_path[0]), weekly_node_reference(selected_path[-1]), source
+
+
+def project_duration_days(idea, week_end):
+    created_at = parse_timestamp(idea.get('createdAt'))
+    if created_at is None:
+        return 0
+    created_date = created_at.astimezone(WEEKLY_TIMEZONE).date()
+    return max(0, (week_end.date() - created_date).days)
+
+
+def build_weekly_report(state, now=None):
+    generated_at = now or datetime.now(timezone.utc)
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    week_start, week_end = previous_week_window(generated_at)
+    new_idea_items = []
+    updated_idea_items = []
+    completed_idea_items = []
+    completed_node_items = []
+    in_progress_nodes = 0
+    active_projects = []
+
+    for idea in state.get('ideas', []):
+        if timestamp_in_window(idea.get('createdAt'), week_start, week_end):
+            new_idea_items.append(weekly_idea_item(idea, idea.get('createdAt')))
+        if timestamp_in_window(idea.get('updatedAt'), week_start, week_end):
+            updated_idea_items.append(weekly_idea_item(idea, idea.get('updatedAt')))
+        completed_idea_at = idea.get('completedAt') or idea.get('updatedAt')
+        if idea.get('status') == 'done' and timestamp_in_window(completed_idea_at, week_start, week_end):
+            completed_idea_items.append(weekly_idea_item(idea, completed_idea_at))
+
+        paths = list(iter_node_paths(idea.get('nodes')))
+        nodes = [path[-1] for path in paths]
+        for node in nodes:
+            completed_at = node.get('completedAt') or node.get('updatedAt')
+            if node.get('status') == 'completed' and timestamp_in_window(completed_at, week_start, week_end):
+                completed_node_items.append(weekly_completed_node_item(idea, node, completed_at))
+        in_progress_nodes += sum(node.get('status') == 'in_progress' for node in nodes)
+        created_at = parse_timestamp(idea.get('createdAt'))
+        existed_by_week_end = created_at is None or created_at < week_end.astimezone(timezone.utc)
+        is_active_project = bool(nodes) and existed_by_week_end and (
+            idea.get('status') == 'try' or any(node.get('status') == 'in_progress' for node in nodes)
+        )
+        if not is_active_project:
+            continue
+        current_phase, current_node, current_node_source = project_current_context(idea)
+        active_projects.append({
+            'ideaId': idea.get('id'),
+            'title': idea.get('title', ''),
+            'status': idea.get('status'),
+            'durationDays': project_duration_days(idea, week_end),
+            'currentPhase': current_phase,
+            'currentNode': current_node,
+            'currentNodeSource': current_node_source,
+            'nodeProgress': node_progress(idea.get('nodes'))
+        })
+
+    active_projects.sort(key=lambda project: (project['title'].casefold(), project['ideaId']))
+    total_active_projects = len(active_projects)
+    active_projects = active_projects[:WEEKLY_PROJECT_LIMIT]
+    new_items, truncated_new = bounded_weekly_items(new_idea_items)
+    updated_items, truncated_updated = bounded_weekly_items(updated_idea_items)
+    completed_idea_details, truncated_completed_ideas = bounded_weekly_items(completed_idea_items)
+    completed_node_details, truncated_completed_nodes = bounded_weekly_items(completed_node_items)
+    return {
+        'id': 'weekly-' + week_start.date().isoformat(),
+        'schemaVersion': 1,
+        'weekStart': week_start.date().isoformat(),
+        'weekEnd': week_end.date().isoformat(),
+        'generatedAt': generated_at.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'dataRevision': state_revision(state),
+        'summary': {
+            'newIdeas': len(new_idea_items),
+            'updatedIdeas': len(updated_idea_items),
+            'completedIdeas': len(completed_idea_items),
+            'inProgressProjects': total_active_projects,
+            'completedNodes': len(completed_node_items),
+            'inProgressNodes': in_progress_nodes
+        },
+        'projects': active_projects,
+        'items': {
+            'limitPerCategory': WEEKLY_ITEM_LIMIT,
+            'newIdeas': new_items,
+            'updatedIdeas': updated_items,
+            'completedIdeas': completed_idea_details,
+            'completedNodes': completed_node_details,
+            'truncated': {
+                'newIdeas': truncated_new,
+                'updatedIdeas': truncated_updated,
+                'completedIdeas': truncated_completed_ideas,
+                'completedNodes': truncated_completed_nodes,
+                'inProgressProjects': max(0, total_active_projects - len(active_projects))
+            }
+        },
+        'delivery': {
+            'status': 'pending',
+            'attempts': 0,
+            'lastAttemptAt': None,
+            'sentAt': None,
+            'errorCode': None
+        }
+    }
+
+
+def retained_weekly_reports(reports):
+    ordered = sorted(reports, key=lambda report: (report.get('weekStart', ''), report.get('generatedAt', '')))
+    return ordered[-WEEKLY_REPORT_LIMIT:]
+
+
+def weekly_email_configured():
+    return (
+        SMTP_SECURITY in {'ssl', 'starttls'}
+        and bool(SMTP_HOST)
+        and 0 < SMTP_PORT <= 65535
+        and bool(SMTP_FROM)
+        and bool(SMTP_RECIPIENTS)
+        and bool(SMTP_USERNAME) == bool(SMTP_PASSWORD)
+    )
+
+
+def weekly_report_subject(report):
+    final_day = date.fromisoformat(report['weekEnd']) - timedelta(days=1)
+    return 'Ideas 周报 · %s 至 %s' % (report['weekStart'], final_day.isoformat())
+
+
+def weekly_item_time(value):
+    parsed = parse_timestamp(value)
+    return parsed.astimezone(WEEKLY_TIMEZONE).strftime('%m-%d %H:%M') if parsed else '-'
+
+
+def weekly_report_detail_text(report):
+    items = report.get('items') or {}
+    sections = []
+    for heading, field in (
+        ('新增想法明细', 'newIdeas'),
+        ('更新想法明细', 'updatedIdeas'),
+        ('完成想法明细', 'completedIdeas')
+    ):
+        values = items.get(field, [])
+        sections.extend([heading] + [
+            '- %s（%s）' % (item['title'], weekly_item_time(item.get('timestamp')))
+            for item in values
+        ] + (['- 无'] if not values else []) + [''])
+    completed_nodes = items.get('completedNodes', [])
+    sections.extend(['完成节点明细'] + [
+        '- %s / %s %s（%s）' % (
+            item['ideaTitle'], item.get('code') or '-', item['title'],
+            weekly_item_time(item.get('completedAt'))
+        )
+        for item in completed_nodes
+    ] + (['- 无'] if not completed_nodes else []) + [''])
+    return sections
+
+
+def weekly_report_detail_html(report):
+    items = report.get('items') or {}
+    sections = []
+    for heading, field in (
+        ('新增想法', 'newIdeas'),
+        ('更新想法', 'updatedIdeas'),
+        ('完成想法', 'completedIdeas')
+    ):
+        values = items.get(field, [])
+        rows = ''.join(
+            '<li style="margin:5px 0">%s <span style="color:#666">%s</span></li>' % (
+                html_module.escape(item['title']),
+                html_module.escape(weekly_item_time(item.get('timestamp')))
+            )
+            for item in values
+        ) or '<li style="margin:5px 0;color:#666">无</li>'
+        sections.append('<h3 style="font-size:15px;margin:18px 0 6px">%s</h3><ul style="margin:0;padding-left:20px">%s</ul>' % (heading, rows))
+    completed_nodes = items.get('completedNodes', [])
+    node_rows = ''.join(
+        '<li style="margin:5px 0">%s / %s %s <span style="color:#666">%s</span></li>' % (
+            html_module.escape(item['ideaTitle']),
+            html_module.escape(item.get('code') or '-'),
+            html_module.escape(item['title']),
+            html_module.escape(weekly_item_time(item.get('completedAt')))
+        )
+        for item in completed_nodes
+    ) or '<li style="margin:5px 0;color:#666">无</li>'
+    sections.append('<h3 style="font-size:15px;margin:18px 0 6px">完成节点</h3><ul style="margin:0;padding-left:20px">%s</ul>' % node_rows)
+    return ''.join(sections)
+
+
+def weekly_report_text(report):
+    summary = report['summary']
+    lines = [
+        weekly_report_subject(report),
+        '',
+        '新增想法：%s' % summary['newIdeas'],
+        '更新想法：%s' % summary['updatedIdeas'],
+        '完成想法：%s' % summary['completedIdeas'],
+        '进行中项目：%s' % summary['inProgressProjects'],
+        '完成节点：%s' % summary['completedNodes'],
+        '进行中节点：%s' % summary['inProgressNodes'],
+        ''
+    ]
+    lines.extend(weekly_report_detail_text(report))
+    lines.append('进行中项目')
+    if not report['projects']:
+        lines.append('本周没有进行中的项目。')
+    for project in report['projects']:
+        phase = project.get('currentPhase') or {}
+        node = project.get('currentNode') or {}
+        lines.extend([
+            project['title'],
+            '  持续天数：%s' % project['durationDays'],
+            '  当前阶段：%s %s' % (phase.get('code', '-'), phase.get('title', '未指定')),
+            '  当前节点：%s %s' % (node.get('code', '-'), node.get('title', '未指定')),
+            '  节点进度：%s/%s' % (project['nodeProgress']['completed'], project['nodeProgress']['total']),
+            ''
+        ])
+    return '\n'.join(lines).rstrip() + '\n'
+
+
+def weekly_report_html(report):
+    summary = report['summary']
+    summary_rows = ''.join(
+        '<tr><th style="text-align:left;padding:6px 12px 6px 0">%s</th><td style="padding:6px 0">%s</td></tr>'
+        % (html_module.escape(label), value)
+        for label, value in (
+            ('新增想法', summary['newIdeas']),
+            ('更新想法', summary['updatedIdeas']),
+            ('完成想法', summary['completedIdeas']),
+            ('进行中项目', summary['inProgressProjects']),
+            ('完成节点', summary['completedNodes']),
+            ('进行中节点', summary['inProgressNodes'])
+        )
+    )
+    project_rows = ''
+    for project in report['projects']:
+        phase = project.get('currentPhase') or {}
+        node = project.get('currentNode') or {}
+        project_rows += (
+            '<tr><td style="padding:8px;border-top:1px solid #ddd">%s</td>'
+            '<td style="padding:8px;border-top:1px solid #ddd">%s</td>'
+            '<td style="padding:8px;border-top:1px solid #ddd">%s</td>'
+            '<td style="padding:8px;border-top:1px solid #ddd">%s</td></tr>'
+        ) % (
+            html_module.escape(project['title']),
+            project['durationDays'],
+            html_module.escape(('%s %s' % (phase.get('code', ''), phase.get('title', '未指定'))).strip()),
+            html_module.escape(('%s %s' % (node.get('code', ''), node.get('title', '未指定'))).strip())
+        )
+    if not project_rows:
+        project_rows = '<tr><td colspan="4" style="padding:8px">本周没有进行中的项目。</td></tr>'
+    return (
+        '<!doctype html><html><body style="font-family:Arial,sans-serif;color:#202124">'
+        '<h1 style="font-size:22px">%s</h1><table>%s</table>%s'
+        '<h2 style="font-size:18px;margin-top:24px">项目进展</h2>'
+        '<table style="border-collapse:collapse;width:100%%"><thead><tr>'
+        '<th style="text-align:left;padding:8px">项目</th><th style="text-align:left;padding:8px">持续天数</th>'
+        '<th style="text-align:left;padding:8px">当前阶段</th><th style="text-align:left;padding:8px">当前节点</th>'
+        '</tr></thead><tbody>%s</tbody></table></body></html>'
+    ) % (
+        html_module.escape(weekly_report_subject(report)), summary_rows,
+        weekly_report_detail_html(report), project_rows
+    )
+
+
+def send_weekly_email(report):
+    if not weekly_email_configured():
+        raise RuntimeError('smtp_not_configured')
+    message = EmailMessage()
+    message['Subject'] = weekly_report_subject(report)
+    message['From'] = SMTP_FROM
+    message['To'] = ', '.join(SMTP_RECIPIENTS)
+    message.set_content(weekly_report_text(report))
+    message.add_alternative(weekly_report_html(report), subtype='html')
+    context = ssl.create_default_context()
+    if SMTP_SECURITY == 'ssl':
+        client = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS, context=context)
+    else:
+        client = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS)
+    with client as smtp_client:
+        if SMTP_SECURITY == 'starttls':
+            smtp_client.ehlo()
+            smtp_client.starttls(context=context)
+            smtp_client.ehlo()
+        if SMTP_USERNAME:
+            smtp_client.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp_client.send_message(message)
+
+
+def smtp_error_code(error):
+    if isinstance(error, RuntimeError) and error.args == ('smtp_not_configured',):
+        return 'smtp_not_configured'
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return 'smtp_auth_failed'
+    if isinstance(error, smtplib.SMTPRecipientsRefused):
+        return 'smtp_recipients_refused'
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return 'smtp_timeout'
+    if isinstance(error, ssl.SSLError):
+        return 'smtp_tls_failed'
+    return 'smtp_delivery_failed'
+
+
+def update_weekly_report_delivery(report_id, **changes):
+    with STATE_LOCK:
+        state = read_state()
+        report = next((item for item in state.get('weeklyReports', []) if item.get('id') == report_id), None)
+        if report is None:
+            raise KeyError(report_id)
+        report.setdefault('delivery', {}).update(changes)
+        state['revision'] = state_revision(state) + 1
+        state['weeklyReports'] = retained_weekly_reports(state.get('weeklyReports', []))
+        upgrade_state_version(state)
+        write_state(state)
+        return copy.deepcopy(report)
+
+
+def get_or_create_weekly_report(now=None):
+    week_start, week_end = previous_week_window(now)
+    report_id = 'weekly-' + week_start.date().isoformat()
+    with STATE_LOCK:
+        state = read_state()
+        reports = state.get('weeklyReports', [])
+        existing = next((report for report in reports if report.get('id') == report_id), None)
+        if existing:
+            return copy.deepcopy(existing), False
+        report = build_weekly_report(state, now)
+        reports = retained_weekly_reports(reports + [report])
+        state['weeklyReports'] = reports
+        state['revision'] = state_revision(state) + 1
+        upgrade_state_version(state)
+        write_state(state)
+        return copy.deepcopy(report), True
+
+
+def run_weekly_automation(now=None, mailer=None, sleep_fn=None):
+    mailer = mailer or send_weekly_email
+    sleep_fn = sleep_fn or time_module.sleep
+    with WEEKLY_RUN_LOCK:
+        report, _ = get_or_create_weekly_report(now)
+        delivery = report.get('delivery', {})
+        attempts = int(delivery.get('attempts', 0))
+        if delivery.get('status') == 'sent' or attempts >= WEEKLY_MAX_ATTEMPTS:
+            return report
+        if not weekly_email_configured():
+            return update_weekly_report_delivery(
+                report['id'], status='failed', errorCode='smtp_not_configured', sentAt=None
+            )
+        while attempts < WEEKLY_MAX_ATTEMPTS:
+            attempts += 1
+            report = update_weekly_report_delivery(
+                report['id'],
+                status='pending',
+                attempts=attempts,
+                lastAttemptAt=utc_now(),
+                errorCode=None
+            )
+            try:
+                mailer(report)
+            except Exception as error:
+                report = update_weekly_report_delivery(
+                    report['id'], status='failed', errorCode=smtp_error_code(error), sentAt=None
+                )
+                if attempts < WEEKLY_MAX_ATTEMPTS:
+                    sleep_fn(WEEKLY_RETRY_SECONDS)
+                continue
+            return update_weekly_report_delivery(
+                report['id'], status='sent', errorCode=None, sentAt=utc_now()
+            )
+        return report
+
+
+def weekly_automation_status(now=None):
+    last_report = None
+    try:
+        if STATE_PATH.exists():
+            reports = read_state().get('weeklyReports', [])
+            if reports:
+                report = retained_weekly_reports(reports)[-1]
+                delivery = report.get('delivery', {})
+                last_report = {
+                    'weekStart': report.get('weekStart'),
+                    'weekEnd': report.get('weekEnd'),
+                    'generatedAt': report.get('generatedAt'),
+                    'deliveryStatus': delivery.get('status'),
+                    'attempts': delivery.get('attempts', 0),
+                    'errorCode': delivery.get('errorCode')
+                }
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        last_report = None
+    return {
+        'enabled': WEEKLY_REPORT_ENABLED,
+        'configured': weekly_email_configured(),
+        'timezone': 'Asia/Shanghai',
+        'schedule': {'weekday': 'monday', 'time': '09:00'},
+        'nextRunAt': next_weekly_run(now).isoformat(),
+        'smtp': {
+            'security': SMTP_SECURITY if SMTP_SECURITY in {'ssl', 'starttls'} else 'invalid',
+            'port': SMTP_PORT,
+            'hostConfigured': bool(SMTP_HOST),
+            'senderConfigured': bool(SMTP_FROM),
+            'authenticationConfigured': bool(SMTP_USERNAME and SMTP_PASSWORD),
+            'recipientCount': len(SMTP_RECIPIENTS)
+        },
+        'retry': {'maxAttempts': WEEKLY_MAX_ATTEMPTS},
+        'lastReport': last_report
+    }
+
+
+def weekly_scheduler_loop(stop_event=None):
+    stop_event = stop_event or WEEKLY_STOP_EVENT
+    while not stop_event.is_set():
+        now = datetime.now(timezone.utc)
+        _, week_end = previous_week_window(now)
+        scheduled_at = datetime.combine(week_end.date(), datetime_time(hour=9), WEEKLY_TIMEZONE)
+        if now.astimezone(WEEKLY_TIMEZONE) >= scheduled_at:
+            try:
+                run_weekly_automation(now)
+            except Exception:
+                print('Weekly report automation failed', flush=True)
+        wait_seconds = max(1, (next_weekly_run(now).astimezone(timezone.utc) - now).total_seconds())
+        stop_event.wait(wait_seconds)
+
+
+def start_weekly_scheduler():
+    if not WEEKLY_REPORT_ENABLED:
+        return None
+    scheduler = threading.Thread(target=weekly_scheduler_loop, name='weekly-report-scheduler', daemon=True)
+    scheduler.start()
+    return scheduler
+
+
 def bounded_string(value, maximum, allow_empty=True):
     return isinstance(value, str) and len(value) <= maximum and (allow_empty or bool(value.strip()))
 
 
 def safe_identifier(value):
     return bounded_string(value, 200, allow_empty=False) and re.fullmatch(r'[A-Za-z0-9._:-]+', value) is not None
+
+
+def nonnegative_integer(value, maximum=10 ** 9):
+    return not isinstance(value, bool) and isinstance(value, int) and 0 <= value <= maximum
+
+
+def valid_optional_timestamp(value):
+    return value is None or (bounded_string(value, 64, allow_empty=False) and parse_timestamp(value) is not None)
+
+
+def valid_weekly_node_reference(value):
+    if value is None:
+        return True
+    return (
+        isinstance(value, dict)
+        and safe_identifier(value.get('id'))
+        and bounded_string(value.get('code', ''), 32)
+        and bounded_string(value.get('title', ''), 160)
+        and value.get('status') in NODE_STATUSES
+    )
+
+
+def valid_weekly_idea_item(item):
+    return (
+        isinstance(item, dict)
+        and safe_identifier(item.get('ideaId'))
+        and bounded_string(item.get('title'), 160, allow_empty=False)
+        and item.get('status') in IDEA_STATUSES
+        and parse_timestamp(item.get('timestamp')) is not None
+    )
+
+
+def valid_weekly_completed_node_item(item):
+    return (
+        isinstance(item, dict)
+        and safe_identifier(item.get('ideaId'))
+        and bounded_string(item.get('ideaTitle'), 160, allow_empty=False)
+        and safe_identifier(item.get('nodeId'))
+        and bounded_string(item.get('code', ''), 32)
+        and bounded_string(item.get('title'), 160, allow_empty=False)
+        and parse_timestamp(item.get('completedAt')) is not None
+    )
+
+
+def valid_weekly_items(items):
+    if items is None:
+        return True
+    if not isinstance(items, dict) or not nonnegative_integer(items.get('limitPerCategory'), 500):
+        return False
+    limit = items['limitPerCategory']
+    if limit < 1:
+        return False
+    for field in ('newIdeas', 'updatedIdeas', 'completedIdeas'):
+        values = items.get(field)
+        if not isinstance(values, list) or len(values) > limit:
+            return False
+        if not all(valid_weekly_idea_item(item) for item in values):
+            return False
+    completed_nodes = items.get('completedNodes')
+    if not isinstance(completed_nodes, list) or len(completed_nodes) > limit:
+        return False
+    if not all(valid_weekly_completed_node_item(item) for item in completed_nodes):
+        return False
+    truncated = items.get('truncated')
+    truncated_fields = ('newIdeas', 'updatedIdeas', 'completedIdeas', 'completedNodes', 'inProgressProjects')
+    return isinstance(truncated, dict) and all(nonnegative_integer(truncated.get(field)) for field in truncated_fields)
+
+
+def valid_weekly_report(report):
+    if not isinstance(report, dict) or not safe_identifier(report.get('id')) or report.get('schemaVersion') != 1:
+        return False
+    try:
+        week_start = date.fromisoformat(report.get('weekStart', ''))
+        week_end = date.fromisoformat(report.get('weekEnd', ''))
+    except (TypeError, ValueError):
+        return False
+    if report['id'] != 'weekly-' + week_start.isoformat() or week_end - week_start != timedelta(days=7):
+        return False
+    if parse_timestamp(report.get('generatedAt')) is None or not nonnegative_integer(report.get('dataRevision', 0)):
+        return False
+    summary = report.get('summary')
+    summary_fields = (
+        'newIdeas', 'updatedIdeas', 'completedIdeas', 'inProgressProjects', 'completedNodes', 'inProgressNodes'
+    )
+    if not isinstance(summary, dict) or not all(nonnegative_integer(summary.get(field)) for field in summary_fields):
+        return False
+    projects = report.get('projects')
+    if not isinstance(projects, list) or len(projects) > WEEKLY_PROJECT_LIMIT:
+        return False
+    if summary['inProgressProjects'] < len(projects):
+        return False
+    for project in projects:
+        if not isinstance(project, dict) or not safe_identifier(project.get('ideaId')):
+            return False
+        if not bounded_string(project.get('title'), 160, allow_empty=False) or project.get('status') not in IDEA_STATUSES:
+            return False
+        if not nonnegative_integer(project.get('durationDays'), 100000):
+            return False
+        if project.get('currentNodeSource') not in {None, 'selected', 'in_progress'}:
+            return False
+        if not valid_weekly_node_reference(project.get('currentPhase')) or not valid_weekly_node_reference(project.get('currentNode')):
+            return False
+        progress = project.get('nodeProgress')
+        if not isinstance(progress, dict):
+            return False
+        if not all(nonnegative_integer(progress.get(field), MAX_NODES) for field in ('total', 'completed', 'inProgress')):
+            return False
+        if not nonnegative_integer(progress.get('percent'), 100):
+            return False
+        if progress['completed'] + progress['inProgress'] > progress['total']:
+            return False
+    if not valid_weekly_items(report.get('items')):
+        return False
+    delivery = report.get('delivery')
+    if not isinstance(delivery, dict) or delivery.get('status') not in WEEKLY_REPORT_STATUSES:
+        return False
+    if not nonnegative_integer(delivery.get('attempts', 0), 10):
+        return False
+    if not valid_optional_timestamp(delivery.get('lastAttemptAt')) or not valid_optional_timestamp(delivery.get('sentAt')):
+        return False
+    error_code = delivery.get('errorCode')
+    return error_code is None or safe_identifier(error_code)
 
 
 def valid_upload_metadata(item, maximum_size):
@@ -187,6 +885,8 @@ def validate_node_tree(nodes, seen_node_ids, counter, depth=0):
             return False
         if not bounded_string(node.get('content', ''), 20000) or node.get('status') not in NODE_STATUSES:
             return False
+        if 'completedAt' in node and not valid_optional_timestamp(node.get('completedAt')):
+            return False
         attachments = node.get('attachments', [])
         if not isinstance(attachments, list) or len(attachments) > 50:
             return False
@@ -199,6 +899,21 @@ def validate_node_tree(nodes, seen_node_ids, counter, depth=0):
 
 def validate_state_payload(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get('ideas'), list) or len(payload['ideas']) > MAX_IDEAS:
+        return False
+    version = payload.get('version')
+    schema_version = payload.get('schemaVersion', version)
+    if type(version) is not int or type(schema_version) is not int:
+        return False
+    if version not in {3, 4, 5} or schema_version not in {3, 4, 5}:
+        return False
+    if 'revision' in payload and not nonnegative_integer(payload['revision']):
+        return False
+    reports = payload.get('weeklyReports', [])
+    if not isinstance(reports, list) or len(reports) > WEEKLY_REPORT_LIMIT:
+        return False
+    if len({report.get('id') for report in reports if isinstance(report, dict)}) != len(reports):
+        return False
+    if not all(valid_weekly_report(report) for report in reports):
         return False
     seen_idea_ids = set()
     seen_node_ids = set()
@@ -221,6 +936,8 @@ def validate_state_payload(payload):
             if not bounded_string(idea.get(field, ''), maximum):
                 return False
         if idea.get('experimentStatus', 'not_started') not in EXPERIMENT_STATUSES:
+            return False
+        if 'completedAt' in idea and not valid_optional_timestamp(idea.get('completedAt')):
             return False
         for field in ('interest', 'value', 'ease'):
             score = idea.get(field, 3)
@@ -373,9 +1090,6 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
             self.send_header('Strict-Transport-Security', 'max-age=31536000')
         super().end_headers()
 
-    def do_HEAD(self):
-        self.do_GET()
-
     def do_GET(self):
         if not self.require_authorization():
             return
@@ -394,6 +1108,9 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
                 self.send_json(200, state, {'ETag': etag_for_revision(revision)})
             except (OSError, json.JSONDecodeError):
                 self.send_json(500, {'error': 'state_unreadable'})
+            return
+        if path == '/api/weekly-automation':
+            self.send_json(200, weekly_automation_status())
             return
         context_match = re.fullmatch(r'/api/ideas/([^/]+)/context', path)
         if context_match:
@@ -547,12 +1264,16 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
                     return
                 next_revision = current_revision + 1
                 state = {
-                    'version': payload.get('version', 2),
-                    'schemaVersion': payload.get('schemaVersion', payload.get('version', 2)),
+                    'version': STATE_VERSION,
+                    'schemaVersion': STATE_VERSION,
                     'revision': next_revision,
                     'ideas': payload['ideas'],
                     'focusId': payload.get('focusId'),
-                    'review': payload.get('review') if isinstance(payload.get('review'), dict) else {}
+                    'review': payload.get('review') if isinstance(payload.get('review'), dict) else {},
+                    'weeklyReports': retained_weekly_reports(
+                        current_state.get('weeklyReports', [])
+                        if current_state else payload.get('weeklyReports', [])
+                    )
                 }
                 write_state(state)
         except (OSError, json.JSONDecodeError):
@@ -602,11 +1323,21 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
                     self.send_json(404, {'error': 'node_not_found'})
                     return
                 changed = False
+                now = utc_now()
                 if 'status' in payload:
                     if payload['status'] not in NODE_STATUSES:
                         self.send_json(400, {'error': 'invalid_node_status'})
                         return
+                    previous_status = node.get('status')
                     node['status'] = payload['status']
+                    if node['status'] == 'completed':
+                        node['completedAt'] = (
+                            node.get('completedAt')
+                            or (node.get('updatedAt') if previous_status == 'completed' else None)
+                            or now
+                        )
+                    else:
+                        node['completedAt'] = None
                     changed = True
                 if 'content' in payload:
                     if not isinstance(payload['content'], str) or len(payload['content']) > 20000:
@@ -617,11 +1348,14 @@ class IdeaDeskHandler(SimpleHTTPRequestHandler):
                 if not changed:
                     self.send_json(400, {'error': 'no_supported_fields'})
                     return
-                now = utc_now()
+                if node.get('status') == 'completed' and not parse_timestamp(node.get('completedAt')):
+                    legacy_updated_at = node.get('updatedAt')
+                    node['completedAt'] = legacy_updated_at if parse_timestamp(legacy_updated_at) else now
                 node['updatedAt'] = now
                 idea['updatedAt'] = now
                 next_revision = current_revision + 1
                 state['revision'] = next_revision
+                upgrade_state_version(state)
                 write_state(state)
                 progress = node_progress(idea.get('nodes'))
         except (OSError, json.JSONDecodeError):
@@ -667,5 +1401,11 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', '8124'))
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(('0.0.0.0', port), IdeaDeskHandler)
+    scheduler = start_weekly_scheduler()
     print('Idea Desk listening on port %s' % port, flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        WEEKLY_STOP_EVENT.set()
+        if scheduler:
+            scheduler.join(timeout=2)

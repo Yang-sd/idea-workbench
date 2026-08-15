@@ -2,7 +2,11 @@
   'use strict';
 
   const STORAGE_KEY = 'idea-desk-v1';
-  const STATE_VERSION = 4;
+  const STATE_VERSION = 5;
+  const WEEKLY_TIMEZONE = 'Asia/Shanghai';
+  const WEEKLY_TIMEZONE_OFFSET = 8 * 60 * 60 * 1000;
+  const WEEKLY_REPORT_LIMIT = 52;
+  const WEEKLY_ITEM_LIMIT = 100;
   const ROUTES = ['all', 'inbox', 'try', 'later', 'done', 'dashboard', 'weekly'];
   const STATUS_LABELS = { inbox: '收件箱', try: '准备尝试', later: '以后再说', done: '已完成' };
   const EXPERIMENT_LABELS = { not_started: '还没开始', in_progress: '进行中', completed: '已完成' };
@@ -133,6 +137,35 @@
     return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : fallback;
   }
 
+  function optionalTimestampValue(value) {
+    return timestampValue(value, null);
+  }
+
+  function nonnegativeInteger(value, maximum) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    return Math.min(maximum ?? Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(parsed)));
+  }
+
+  function boundedText(value, maximum, fallback) {
+    return textValue(value, fallback).slice(0, maximum);
+  }
+
+  function safeHistoryId(value) {
+    const id = textValue(value);
+    return id.length <= 200 && /^[A-Za-z0-9._:-]+$/.test(id) ? id : '';
+  }
+
+  function dateOnlyValue(value) {
+    const raw = textValue(value);
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+    if (!match) return '';
+    const parsed = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+    return parsed.getUTCFullYear() === Number(match[1])
+      && parsed.getUTCMonth() === Number(match[2]) - 1
+      && parsed.getUTCDate() === Number(match[3]) ? raw : '';
+  }
+
   function scoreValue(value) {
     return Math.max(1, Math.min(5, Number(value) || 3));
   }
@@ -154,6 +187,7 @@
     const source = node && typeof node === 'object' ? node : {};
     const now = new Date().toISOString();
     const status = NODE_STATUS_LABELS[source.status] ? source.status : 'not_started';
+    const updatedAt = timestampValue(source.updatedAt, now);
     return {
       ...source,
       id: textValue(source.id) || 'node-' + uid(),
@@ -161,10 +195,11 @@
       title: textValue(source.title, '未命名节点'),
       content: textValue(source.content),
       status,
+      completedAt: status === 'completed' ? optionalTimestampValue(source.completedAt) || updatedAt : null,
       attachments: Array.isArray(source.attachments) ? source.attachments.map((file) => normalizeFile(file, 'attachment')) : [],
       children: Array.isArray(source.children) ? source.children.map((child, childIndex) => normalizeNode(child, childIndex)) : [],
       createdAt: timestampValue(source.createdAt, now),
-      updatedAt: timestampValue(source.updatedAt, now)
+      updatedAt
     };
   }
 
@@ -174,6 +209,7 @@
     const rawTags = Array.isArray(source.tags) ? source.tags : textValue(source.tags).split(',');
     const status = STATUS_LABELS[source.status] ? source.status : 'inbox';
     const experimentStatus = EXPERIMENT_LABELS[source.experimentStatus] ? source.experimentStatus : 'not_started';
+    const updatedAt = timestampValue(source.updatedAt, now);
     const normalized = {
       ...source,
       id: textValue(source.id) || 'idea-' + (index + 1) + '-' + uid(),
@@ -184,6 +220,7 @@
       nextAction: textValue(source.nextAction),
       finishLine: textValue(source.finishLine),
       status,
+      completedAt: status === 'done' ? optionalTimestampValue(source.completedAt) || updatedAt : null,
       tags: rawTags.map((tag) => textValue(tag).trim()).filter(Boolean).slice(0, 8),
       interest: scoreValue(source.interest),
       value: scoreValue(source.value),
@@ -194,10 +231,168 @@
       files: Array.isArray(source.files) ? source.files.map((file) => normalizeFile(file, 'file')) : [],
       nodes: Array.isArray(source.nodes) ? source.nodes.map((node, nodeIndex) => normalizeNode(node, nodeIndex)) : [],
       createdAt: timestampValue(source.createdAt, now),
-      updatedAt: timestampValue(source.updatedAt, now)
+      updatedAt
     };
     normalized.currentNodeId = findProjectNode(normalized, textValue(source.currentNodeId))?.id || null;
     return normalized;
+  }
+
+  function normalizeWeeklyNodeReference(reference) {
+    const source = reference && typeof reference === 'object' && !Array.isArray(reference) ? reference : null;
+    if (!source) return null;
+    const id = safeHistoryId(source.id);
+    if (!id) return null;
+    return {
+      ...source,
+      id,
+      code: boundedText(source.code, 32),
+      title: boundedText(source.title, 160),
+      status: NODE_STATUS_LABELS[source.status] ? source.status : 'not_started'
+    };
+  }
+
+  function normalizeWeeklyProject(project) {
+    const source = project && typeof project === 'object' && !Array.isArray(project) ? project : null;
+    if (!source) return null;
+    const ideaId = safeHistoryId(source.ideaId);
+    const title = boundedText(source.title, 160).trim();
+    if (!ideaId || !title) return null;
+    const progressSource = source.nodeProgress && typeof source.nodeProgress === 'object' && !Array.isArray(source.nodeProgress) ? source.nodeProgress : {};
+    const completed = nonnegativeInteger(progressSource.completed, 50000);
+    const inProgress = Math.min(nonnegativeInteger(progressSource.inProgress, 50000), 50000 - completed);
+    const total = Math.min(50000, Math.max(completed + inProgress, nonnegativeInteger(progressSource.total, 50000)));
+    return {
+      ...source,
+      ideaId,
+      title,
+      status: STATUS_LABELS[source.status] ? source.status : 'inbox',
+      durationDays: nonnegativeInteger(source.durationDays, 100000),
+      currentPhase: normalizeWeeklyNodeReference(source.currentPhase),
+      currentNode: normalizeWeeklyNodeReference(source.currentNode),
+      currentNodeSource: ['selected', 'in_progress'].includes(source.currentNodeSource) ? source.currentNodeSource : null,
+      nodeProgress: {
+        ...progressSource,
+        total,
+        completed,
+        inProgress,
+        percent: nonnegativeInteger(progressSource.percent, 100)
+      }
+    };
+  }
+
+  function normalizeWeeklyIdeaItem(item) {
+    const source = item && typeof item === 'object' && !Array.isArray(item) ? item : null;
+    if (!source) return null;
+    const ideaId = safeHistoryId(source.ideaId);
+    const title = boundedText(source.title, 160).trim();
+    const timestamp = optionalTimestampValue(source.timestamp);
+    if (!ideaId || !title || !timestamp) return null;
+    return {
+      ...source,
+      ideaId,
+      title,
+      status: STATUS_LABELS[source.status] ? source.status : 'inbox',
+      timestamp
+    };
+  }
+
+  function normalizeWeeklyCompletedNodeItem(item) {
+    const source = item && typeof item === 'object' && !Array.isArray(item) ? item : null;
+    if (!source) return null;
+    const ideaId = safeHistoryId(source.ideaId);
+    const nodeId = safeHistoryId(source.nodeId);
+    const ideaTitle = boundedText(source.ideaTitle, 160).trim();
+    const title = boundedText(source.title, 160).trim();
+    const completedAt = optionalTimestampValue(source.completedAt);
+    if (!ideaId || !nodeId || !ideaTitle || !title || !completedAt) return null;
+    return {
+      ...source,
+      ideaId,
+      ideaTitle,
+      nodeId,
+      code: boundedText(source.code, 32),
+      title,
+      completedAt
+    };
+  }
+
+  function normalizeWeeklyItems(items) {
+    const source = items && typeof items === 'object' && !Array.isArray(items) ? items : null;
+    if (!source) return null;
+    const sourceLimit = nonnegativeInteger(source.limitPerCategory, 500);
+    const limit = Math.min(WEEKLY_ITEM_LIMIT, Math.max(1, sourceLimit || WEEKLY_ITEM_LIMIT));
+    const normalizeList = (value, normalizer) => (Array.isArray(value) ? value : [])
+      .map(normalizer)
+      .filter(Boolean)
+      .slice(0, limit);
+    const truncatedSource = source.truncated && typeof source.truncated === 'object' && !Array.isArray(source.truncated) ? source.truncated : {};
+    return {
+      ...source,
+      limitPerCategory: limit,
+      newIdeas: normalizeList(source.newIdeas, normalizeWeeklyIdeaItem),
+      updatedIdeas: normalizeList(source.updatedIdeas, normalizeWeeklyIdeaItem),
+      completedIdeas: normalizeList(source.completedIdeas, normalizeWeeklyIdeaItem),
+      completedNodes: normalizeList(source.completedNodes, normalizeWeeklyCompletedNodeItem),
+      truncated: {
+        ...truncatedSource,
+        newIdeas: nonnegativeInteger(truncatedSource.newIdeas),
+        updatedIdeas: nonnegativeInteger(truncatedSource.updatedIdeas),
+        completedIdeas: nonnegativeInteger(truncatedSource.completedIdeas),
+        completedNodes: nonnegativeInteger(truncatedSource.completedNodes),
+        inProgressProjects: nonnegativeInteger(truncatedSource.inProgressProjects)
+      }
+    };
+  }
+
+  function normalizeWeeklyReport(report) {
+    const source = report && typeof report === 'object' ? report : {};
+    const summary = source.summary && typeof source.summary === 'object' && !Array.isArray(source.summary) ? source.summary : {};
+    const delivery = source.delivery && typeof source.delivery === 'object' && !Array.isArray(source.delivery) ? source.delivery : {};
+    const weekStart = dateOnlyValue(source.weekStart);
+    const weekEnd = dateOnlyValue(source.weekEnd);
+    const generatedAt = optionalTimestampValue(source.generatedAt);
+    if (!weekStart || !weekEnd || !generatedAt) return null;
+    const expectedEnd = new Date(Date.parse(weekStart + 'T00:00:00Z') + 7 * 86400000).toISOString().slice(0, 10);
+    if (weekEnd !== expectedEnd) return null;
+    return {
+      ...source,
+      id: 'weekly-' + weekStart,
+      schemaVersion: 1,
+      weekStart,
+      weekEnd,
+      generatedAt,
+      dataRevision: nonnegativeInteger(source.dataRevision),
+      summary: {
+        ...summary,
+        newIdeas: nonnegativeInteger(summary.newIdeas),
+        updatedIdeas: nonnegativeInteger(summary.updatedIdeas),
+        completedIdeas: nonnegativeInteger(summary.completedIdeas),
+        inProgressProjects: nonnegativeInteger(summary.inProgressProjects),
+        completedNodes: nonnegativeInteger(summary.completedNodes),
+        inProgressNodes: nonnegativeInteger(summary.inProgressNodes)
+      },
+      projects: (Array.isArray(source.projects) ? source.projects : []).map(normalizeWeeklyProject).filter(Boolean).slice(0, WEEKLY_ITEM_LIMIT),
+      items: normalizeWeeklyItems(source.items),
+      delivery: {
+        ...delivery,
+        status: ['pending', 'sent', 'failed'].includes(delivery.status) ? delivery.status : 'pending',
+        attempts: nonnegativeInteger(delivery.attempts, 10),
+        lastAttemptAt: optionalTimestampValue(delivery.lastAttemptAt),
+        sentAt: optionalTimestampValue(delivery.sentAt),
+        errorCode: safeHistoryId(delivery.errorCode) || null
+      }
+    };
+  }
+
+  function normalizeWeeklyReports(reports) {
+    const byId = new Map();
+    (Array.isArray(reports) ? reports : []).slice(-WEEKLY_REPORT_LIMIT).forEach((report) => {
+      const normalized = normalizeWeeklyReport(report);
+      if (normalized) byId.set(normalized.id, normalized);
+    });
+    return Array.from(byId.values())
+      .sort((left, right) => String(left.weekStart).localeCompare(String(right.weekStart)))
+      .slice(-WEEKLY_REPORT_LIMIT);
   }
 
   function normalizeState(source) {
@@ -212,6 +407,7 @@
       revision: Number.isInteger(input.revision) && input.revision >= 0 ? input.revision : 0,
       ideas,
       focusId,
+      weeklyReports: normalizeWeeklyReports(input.weeklyReports),
       review: {
         ...review,
         wins: textValue(review.wins),
@@ -240,8 +436,28 @@
       revision: Number(source.revision) || 0,
       ideas: source.ideas,
       focusId: source.focusId,
+      weeklyReports: source.weeklyReports || [],
       review: source.review
     };
+  }
+
+  async function loadWeeklyAutomation() {
+    try {
+      const response = await fetch('/api/weekly-automation', { cache: 'no-store' });
+      if (!response.ok) throw new Error('automation unavailable');
+      const payload = await response.json();
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('invalid automation status');
+      return { ...payload, available: true };
+    } catch (error) {
+      return {
+        available: false,
+        enabled: false,
+        configured: false,
+        timezone: WEEKLY_TIMEZONE,
+        schedule: { weekday: 'monday', time: '09:00' },
+        nextRunAt: null
+      };
+    }
   }
 
   class StateConflictError extends Error {
@@ -295,6 +511,8 @@
   const state = {
     ideas: initial.ideas,
     focusId: initial.focusId,
+    weeklyReports: initial.weeklyReports,
+    weeklyAutomation: {},
     review: initial.review,
     revision: initial.revision,
     persistence: 'local',
@@ -432,8 +650,8 @@
   }
 
   function currentWeekCompleted() {
-    const cutoff = Date.now() - 7 * 86400000;
-    return state.ideas.filter((idea) => idea.status === 'done' && new Date(idea.updatedAt).getTime() >= cutoff);
+    const { start, end } = weekBounds();
+    return state.ideas.filter((idea) => idea.status === 'done' && inPeriod(idea.completedAt || idea.updatedAt, start, end));
   }
 
   function projectNodesOf(idea) {
@@ -545,6 +763,7 @@
       title: title || '新节点',
       content: '',
       status: 'not_started',
+      completedAt: null,
       attachments: [],
       children: [],
       createdAt: now,
@@ -837,30 +1056,205 @@
       '<section class="route-section"><div class="section-heading"><div><h2>成果记录</h2><p>完成不代表永远结束，只代表这一阶段已经闭环。</p></div></div><div class="outcome-list">' + (records || emptyState('circle-check', '还没有完成记录', '完成第一个小实验后，它会出现在这里。', '<a class="button primary-button" href="#/try">查看实验队列</a>')) + '</div></section>';
   }
 
-  function weekRange() {
-    const now = new Date();
-    const day = now.getDay() || 7;
-    const monday = new Date(now);
-    monday.setDate(now.getDate() - day + 1);
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-    const format = (date) => date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-    return format(monday) + ' - ' + format(sunday);
+  function weekBounds(reference) {
+    const now = reference instanceof Date ? new Date(reference) : new Date();
+    const shanghai = new Date(now.getTime() + WEEKLY_TIMEZONE_OFFSET);
+    const day = shanghai.getUTCDay() || 7;
+    shanghai.setUTCHours(0, 0, 0, 0);
+    shanghai.setUTCDate(shanghai.getUTCDate() - day + 1);
+    const start = new Date(shanghai.getTime() - WEEKLY_TIMEZONE_OFFSET);
+    const end = new Date(start.getTime() + 7 * 86400000);
+    return { start, end };
+  }
+
+  function weekRange(reference) {
+    const { start, end } = weekBounds(reference);
+    const sunday = new Date(end.getTime() - 1);
+    const format = (date) => date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', timeZone: WEEKLY_TIMEZONE });
+    return format(start) + ' - ' + format(sunday);
+  }
+
+  function weeklyTimestamp(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '时间未知';
+    return date.toLocaleString('zh-CN', {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: WEEKLY_TIMEZONE
+    });
+  }
+
+  function weeklyPeriodLabel(weekStart, weekEnd) {
+    const start = dateOnlyValue(weekStart);
+    const end = dateOnlyValue(weekEnd);
+    if (!start || !end) return '历史周报';
+    const [startYear, startMonth, startDay] = start.split('-').map(Number);
+    const [endYear, endMonth, endDay] = end.split('-').map(Number);
+    const finalDay = new Date(Date.UTC(endYear, endMonth - 1, endDay) - 86400000);
+    const startLabel = startYear === finalDay.getUTCFullYear()
+      ? startMonth + '/' + startDay
+      : startYear + '/' + startMonth + '/' + startDay;
+    const endLabel = (startYear === finalDay.getUTCFullYear() ? '' : finalDay.getUTCFullYear() + '/')
+      + (finalDay.getUTCMonth() + 1) + '/' + finalDay.getUTCDate();
+    return startLabel + ' - ' + endLabel;
+  }
+
+  function inPeriod(value, start, end) {
+    const timestamp = new Date(value).getTime();
+    return Number.isFinite(timestamp) && timestamp >= start.getTime() && timestamp < end.getTime();
+  }
+
+  function projectAgeDays(idea) {
+    const started = new Date(idea.createdAt).getTime();
+    const finished = Date.now();
+    if (!Number.isFinite(started) || !Number.isFinite(finished)) return 0;
+    return Math.max(1, Math.ceil((finished - started) / 86400000));
+  }
+
+  function liveWeeklyReport() {
+    const { start, end } = weekBounds();
+    const newIdeas = state.ideas.filter((idea) => inPeriod(idea.createdAt, start, end));
+    const updatedIdeas = state.ideas.filter((idea) => inPeriod(idea.updatedAt, start, end));
+    const completedIdeas = state.ideas.filter((idea) => idea.status === 'done' && inPeriod(idea.completedAt || idea.updatedAt, start, end));
+    const completedNodes = [];
+    const touchedProjectIds = new Set();
+    const executableProjects = projectIdeas().filter((idea) => projectNodesOf(idea).length > 0);
+    const activeProjects = executableProjects.filter((idea) => {
+      const stats = projectNodeStats(idea);
+      return idea.status === 'try' || stats.inProgress > 0;
+    }).sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
+    projectIdeas().forEach((idea) => {
+      let touched = inPeriod(idea.updatedAt, start, end);
+      walkProjectNodes(projectNodesOf(idea), (node) => {
+        if (inPeriod(node.updatedAt, start, end)) touched = true;
+        if (node.status === 'completed' && inPeriod(node.completedAt || node.updatedAt, start, end)) {
+          completedNodes.push({ idea, node, timestamp: node.completedAt || node.updatedAt });
+        }
+      });
+      if (touched) touchedProjectIds.add(idea.id);
+    });
+    completedNodes.sort((left, right) => new Date(right.timestamp) - new Date(left.timestamp));
+    const inProgressNodes = activeProjects.reduce((count, idea) => count + projectNodeStats(idea).inProgress, 0);
+    return { start, end, newIdeas, updatedIdeas, completedIdeas, completedNodes, activeProjects, touchedProjects: touchedProjectIds.size, inProgressNodes };
+  }
+
+  function weeklyAutomationMarkup() {
+    const automation = state.weeklyAutomation || {};
+    const available = automation.available !== false;
+    const enabled = available && Boolean(automation.enabled);
+    const emailConfigured = Boolean(automation.configured);
+    const scheduleTime = textValue(automation.schedule?.time, '09:00');
+    const schedule = '每周一 ' + scheduleTime;
+    const timezone = textValue(automation.timezone, WEEKLY_TIMEZONE);
+    const nextRun = automation.nextRunAt ? weeklyTimestamp(automation.nextRunAt) : '等待服务端调度';
+    const heading = !available ? '自动化状态暂不可用' : enabled ? '自动周报已启用' : '自动周报未启用';
+    const taskClass = !available ? 'is-waiting' : enabled ? 'is-on' : 'is-off';
+    const taskIcon = !available ? 'cloud-off' : enabled ? 'check-circle-2' : 'pause-circle';
+    const taskLabel = !available ? '服务连接异常' : enabled ? '定时任务运行中' : '定时任务已暂停';
+    const emailClass = !available ? 'is-waiting' : emailConfigured ? 'is-on' : 'is-waiting';
+    const emailLabel = !available ? '邮箱状态未知' : emailConfigured ? '邮件通知已连接' : '邮箱待配置';
+    return '<section class="weekly-automation-band"><div class="weekly-automation-icon"><i data-lucide="calendar-clock"></i></div><div class="weekly-automation-main"><span>AUTOMATED WEEKLY REPORT</span><strong>' + heading + '</strong><small>' + escapeHTML(schedule) + ' · ' + escapeHTML(timezone) + ' · 下次 ' + escapeHTML(nextRun) + '</small></div><div class="weekly-automation-state"><span class="automation-state ' + taskClass + '"><i data-lucide="' + taskIcon + '"></i>' + taskLabel + '</span><span class="automation-state ' + emailClass + '"><i data-lucide="mail"></i>' + emailLabel + '</span></div></section>';
+  }
+
+  function weeklyProjectRows(projects) {
+    return projects.slice(0, 12).map((idea) => {
+      const stats = projectNodeStats(idea);
+      const current = findProjectNode(idea, idea.currentNodeId);
+      const stage = currentProjectStage(idea);
+      const statusClass = stats.inProgress ? 'in_progress' : idea.status === 'done' ? 'completed' : 'not_started';
+      const statusLabel = stats.inProgress ? stats.inProgress + ' 个进行中' : idea.status === 'done' ? '已完成' : STATUS_LABELS[idea.status];
+      return '<article class="weekly-project-row"><button data-action="open-idea" data-id="' + escapeHTML(idea.id) + '" type="button"><strong>' + escapeHTML(idea.title) + '</strong><small>' + escapeHTML(current ? current.code + ' · ' + current.title : '尚未指定当前节点') + '</small></button><div><span>当前阶段</span><strong>' + escapeHTML(stage?.code || '—') + '</strong></div><div><span>节点进度</span><strong>' + stats.percent + '%</strong><small>' + stats.completed + ' / ' + stats.total + '</small></div><div><span>持续时间</span><strong>' + projectAgeDays(idea) + ' 天</strong><small>' + weeklyTimestamp(idea.updatedAt) + ' 更新</small></div><span class="node-status-text ' + statusClass + '">' + statusLabel + '</span></article>';
+    }).join('');
+  }
+
+  function weeklyHistoryRecord(content, ideaId) {
+    if (ideaById(ideaId)) {
+      return '<button class="weekly-history-record" data-action="open-idea" data-id="' + escapeHTML(ideaId) + '" type="button">' + content + '<i data-lucide="arrow-up-right"></i></button>';
+    }
+    return '<div class="weekly-history-record">' + content + '</div>';
+  }
+
+  function weeklyHistoryIdeaRecords(items) {
+    return (items || []).slice(0, 5).map((item) => weeklyHistoryRecord(
+      '<span><strong>' + escapeHTML(item.title) + '</strong><small>' + weeklyTimestamp(item.timestamp) + '</small></span>',
+      item.ideaId
+    )).join('');
+  }
+
+  function weeklyHistoryNodeRecords(items) {
+    return (items || []).slice(0, 5).map((item) => weeklyHistoryRecord(
+      '<span class="weekly-history-node-copy"><span class="node-code">' + escapeHTML(item.code || '节点') + '</span><span><strong>' + escapeHTML(item.title) + '</strong><small>' + escapeHTML(item.ideaTitle) + ' · ' + weeklyTimestamp(item.completedAt) + '</small></span></span>',
+      item.ideaId
+    )).join('');
+  }
+
+  function weeklyHistoryProjectRecords(projects) {
+    return (projects || []).slice(0, 5).map((project) => {
+      const progress = project.nodeProgress || {};
+      const current = project.currentNode;
+      return weeklyHistoryRecord(
+        '<span class="weekly-history-project-copy"><span><strong>' + escapeHTML(project.title) + '</strong><small>' + escapeHTML(current ? current.code + ' · ' + current.title : '尚未指定节点') + '</small></span><span class="weekly-history-record-meta">' + nonnegativeInteger(progress.percent, 100) + '% · ' + nonnegativeInteger(project.durationDays, 100000) + ' 天</span></span>',
+        project.ideaId
+      );
+    }).join('');
+  }
+
+  function weeklyHistoryGroup(title, count, records, emptyLabel) {
+    const total = nonnegativeInteger(count);
+    const remainder = records ? Math.max(0, total - 5) : 0;
+    const more = remainder ? '<p class="weekly-history-more">另有 ' + remainder + ' 条记录</p>' : '';
+    return '<section class="weekly-history-group"><div><h3>' + escapeHTML(title) + '</h3><span>' + total + '</span></div><div class="weekly-history-records">' + (records ? records + more : '<p>' + escapeHTML(emptyLabel) + '</p>') + '</div></section>';
+  }
+
+  function weeklyHistoryMarkup() {
+    const reports = (state.weeklyReports || []).slice().sort((a, b) => String(b.weekStart).localeCompare(String(a.weekStart))).slice(0, 6);
+    if (!reports.length) return '<div class="weekly-history-empty"><i data-lucide="history"></i><div><strong>还没有自动周报</strong><span>首份报告会在下一个计划时间生成并保存在这里。</span></div></div>';
+    return reports.map((report, index) => {
+      const summary = report.summary || {};
+      const period = weeklyPeriodLabel(report.weekStart, report.weekEnd);
+      const delivery = report.delivery || {};
+      const emailStatus = delivery.errorCode === 'smtp_not_configured' ? 'not_configured' : delivery.status;
+      const emailLabels = { sent: '邮件已发送', pending: '等待发送', failed: '发送失败', not_configured: '未配置邮箱' };
+      const items = report.items || {};
+      const unavailableLabel = report.items ? null : '旧版周报未保存明细';
+      const details = weeklyHistoryGroup('新增想法', summary.newIdeas, weeklyHistoryIdeaRecords(items.newIdeas), unavailableLabel || '这一周没有新增想法')
+        + weeklyHistoryGroup('更新想法', summary.updatedIdeas, weeklyHistoryIdeaRecords(items.updatedIdeas), unavailableLabel || '这一周没有更新想法')
+        + weeklyHistoryGroup('完成想法', summary.completedIdeas, weeklyHistoryIdeaRecords(items.completedIdeas), unavailableLabel || '这一周没有完成想法')
+        + weeklyHistoryGroup('完成节点', summary.completedNodes, weeklyHistoryNodeRecords(items.completedNodes), unavailableLabel || '这一周没有完成节点')
+        + weeklyHistoryGroup('进行中项目', summary.inProgressProjects, weeklyHistoryProjectRecords(report.projects), '这一周没有进行中项目');
+      return '<details class="weekly-history-report"' + (index === 0 ? ' open' : '') + '><summary class="weekly-history-row"><span class="weekly-history-main"><span>' + escapeHTML(period) + '</span><strong>' + nonnegativeInteger(summary.completedIdeas) + ' 个想法完成 · ' + nonnegativeInteger(summary.completedNodes) + ' 个节点完成</strong><small>生成于 ' + weeklyTimestamp(report.generatedAt) + '</small></span><span class="weekly-history-metric"><span>活跃项目</span><strong>' + nonnegativeInteger(summary.inProgressProjects) + '</strong></span><span class="weekly-history-metric"><span>本周更新</span><strong>' + nonnegativeInteger(summary.updatedIdeas) + '</strong></span><span class="weekly-email-state ' + escapeHTML(emailStatus) + '"><i data-lucide="mail"></i>' + (emailLabels[emailStatus] || '未发送') + '</span><i class="weekly-history-toggle" data-lucide="chevron-down"></i></summary><div class="weekly-history-details">' + details + '</div></details>';
+    }).join('');
   }
 
   function renderWeeklyPage() {
-    const done = currentWeekCompleted();
+    const report = liveWeeklyReport();
     const active = state.ideas.filter((idea) => idea.status === 'try');
     const focus = focusIdea();
-    return pageHeader('WEEKLY REVIEW · ' + weekRange(), '本周复盘', '停下来整理事实，决定下周只把哪一件事带走。', '') +
-      '<section class="review-metrics"><div><span>本周完成</span><strong>' + done.length + '</strong></div><div><span>正在尝试</span><strong>' + active.length + '</strong></div><div><span>待整理</span><strong>' + statusCount('inbox') + '</strong></div></section>' +
-      '<section class="review-layout"><form class="review-form" id="weeklyReviewForm"><div class="section-heading"><div><h2>写下这一周</h2><p>只记录事实、判断和下一步。</p></div></div>' +
+    const completedIds = new Set(report.completedIdeas.map((idea) => idea.id));
+    const newIds = new Set(report.newIdeas.map((idea) => idea.id));
+    const ideaEvents = [
+      ...report.completedIdeas.map((idea) => ({ idea, label: '已完成', icon: 'circle-check', timestamp: idea.completedAt || idea.updatedAt, type: 'completed' })),
+      ...report.newIdeas.filter((idea) => !completedIds.has(idea.id)).map((idea) => ({ idea, label: '新想法', icon: 'sparkles', timestamp: idea.createdAt, type: 'new' })),
+      ...report.updatedIdeas.filter((idea) => !completedIds.has(idea.id) && !newIds.has(idea.id)).map((idea) => ({ idea, label: '有更新', icon: 'pencil-line', timestamp: idea.updatedAt, type: 'updated' }))
+    ].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const eventRows = ideaEvents.slice(0, 10).map((event) => '<button class="weekly-event-row ' + event.type + '" data-action="open-idea" data-id="' + escapeHTML(event.idea.id) + '" type="button"><span><i data-lucide="' + event.icon + '"></i></span><div><strong>' + escapeHTML(event.idea.title) + '</strong><small>' + event.label + ' · ' + weeklyTimestamp(event.timestamp) + '</small></div><i data-lucide="arrow-right"></i></button>').join('');
+    const completedNodeRows = report.completedNodes.slice(0, 10).map((entry) => '<button class="weekly-node-row" data-action="open-idea" data-id="' + escapeHTML(entry.idea.id) + '" type="button"><span class="node-code">' + escapeHTML(entry.node.code) + '</span><div><strong>' + escapeHTML(entry.node.title) + '</strong><small>' + escapeHTML(entry.idea.title) + ' · ' + weeklyTimestamp(entry.timestamp) + '</small></div></button>').join('');
+    return pageHeader('WEEKLY REVIEW · ' + weekRange(), '本周复盘', '自动汇总这一周的完成、推进和项目节奏，再决定下周最重要的一件事。', '') +
+      weeklyAutomationMarkup() +
+      '<section class="weekly-metrics" aria-label="本周实时统计"><div><span>本周更新</span><strong>' + report.updatedIdeas.length + '</strong><small>' + report.newIdeas.length + ' 个新想法</small></div><div><span>完成想法</span><strong>' + report.completedIdeas.length + '</strong><small>本周形成结果</small></div><div><span>活跃项目</span><strong>' + report.activeProjects.length + '</strong><small>' + report.inProgressNodes + ' 个节点进行中</small></div><div><span>完成节点</span><strong>' + report.completedNodes.length + '</strong><small>' + report.touchedProjects + ' 个项目有更新</small></div></section>' +
+      '<section class="weekly-evidence-grid"><div><div class="section-heading"><div><h2>本周发生了什么</h2><p>根据创建、完成和更新时间自动整理。</p></div><span class="title-count">' + ideaEvents.length + '</span></div><div class="weekly-event-list">' + (eventRows || '<p class="muted-copy">本周还没有新增、更新或完成的想法。</p>') + '</div></div><div><div class="section-heading"><div><h2>完成的项目节点</h2><p>按最近完成时间排列。</p></div><span class="title-count">' + report.completedNodes.length + '</span></div><div class="weekly-node-list">' + (completedNodeRows || '<p class="muted-copy">本周还没有完成节点。</p>') + '</div></div></section>' +
+      '<section class="weekly-projects"><div class="section-heading"><div><h2>进行中的项目</h2><p>集中查看当前阶段、进度、持续时间和最近更新时间。</p></div><span class="title-count">' + report.activeProjects.length + '</span></div><div class="weekly-project-list">' + (weeklyProjectRows(report.activeProjects) || '<p class="muted-copy">现在没有进行中的项目。</p>') + '</div></section>' +
+      '<section class="weekly-history"><div class="section-heading"><div><h2>自动周报记录</h2><p>NAS 生成后会长期保留，邮件状态也会同步记录。</p></div><span class="title-count">' + (state.weeklyReports || []).length + '</span></div><div class="weekly-history-list">' + weeklyHistoryMarkup() + '</div></section>' +
+      '<section class="review-layout"><form class="review-form" id="weeklyReviewForm"><div class="section-heading"><div><h2>补充你的判断</h2><p>自动统计负责事实，你只记录判断和下一步。</p></div></div>' +
       '<label class="field-label" for="reviewWins">这周真正推进了什么</label><textarea class="text-input" id="reviewWins" name="wins" rows="4" placeholder="完成、发布、验证或放弃了什么">' + escapeHTML(state.review.wins || '') + '</textarea>' +
       '<label class="field-label" for="reviewLearnings">得到的事实</label><textarea class="text-input" id="reviewLearnings" name="learnings" rows="4" placeholder="哪些假设被证明或推翻">' + escapeHTML(state.review.learnings || '') + '</textarea>' +
       '<label class="field-label" for="reviewNext">下周唯一重点</label><textarea class="text-input" id="reviewNext" name="next" rows="3" placeholder="只写一件最重要的事">' + escapeHTML(state.review.next || '') + '</textarea>' +
-      '<button class="button primary-button" type="submit"><i data-lucide="save"></i>保存本周复盘</button></form>' +
-      '<div class="review-side"><div class="section-heading"><div><h2>下周只带走一个</h2><p>当前专注会显示在所有页面顶部。</p></div></div><div class="focus-options">' + (active.length ? active.map((idea) => '<button class="focus-option ' + (focus && focus.id === idea.id ? 'is-selected' : '') + '" data-action="focus" data-id="' + idea.id + '" type="button"><span><i data-lucide="' + (focus && focus.id === idea.id ? 'circle-dot' : 'circle') + '"></i></span><div><strong>' + escapeHTML(idea.title) + '</strong><small>' + escapeHTML(idea.nextAction || '还没有下一步动作') + '</small></div></button>').join('') : '<p class="muted-copy">还没有准备尝试的想法。</p>') + '</div>' +
-      '<div class="week-evidence"><h3>本周完成</h3>' + (done.length ? done.map((idea) => '<button data-action="open-idea" data-id="' + idea.id + '" type="button"><i data-lucide="check"></i><span>' + escapeHTML(idea.title) + '</span></button>').join('') : '<p class="muted-copy">本周还没有完成记录。</p>') + '</div></div></section>';
+      '<button class="button primary-button" type="submit"><i data-lucide="save"></i>保存本周判断</button></form>' +
+      '<div class="review-side"><div class="section-heading"><div><h2>下周只带走一个</h2><p>当前专注会显示在所有页面顶部。</p></div></div><div class="focus-options">' + (active.length ? active.map((idea) => '<button class="focus-option ' + (focus && focus.id === idea.id ? 'is-selected' : '') + '" data-action="focus" data-id="' + escapeHTML(idea.id) + '" type="button"><span><i data-lucide="' + (focus && focus.id === idea.id ? 'circle-dot' : 'circle') + '"></i></span><div><strong>' + escapeHTML(idea.title) + '</strong><small>' + escapeHTML(idea.nextAction || '还没有下一步动作') + '</small></div></button>').join('') : '<p class="muted-copy">还没有准备尝试的想法。</p>') + '</div>' +
+      '<div class="week-evidence"><h3>本周完成</h3>' + (report.completedIdeas.length ? report.completedIdeas.map((idea) => '<button data-action="open-idea" data-id="' + escapeHTML(idea.id) + '" type="button"><i data-lucide="check"></i><span>' + escapeHTML(idea.title) + '</span></button>').join('') : '<p class="muted-copy">本周还没有完成记录。</p>') + '</div></div></section>';
   }
 
   function renderDetailPage(idea) {
@@ -1038,6 +1432,7 @@
   function createIdea(form, quick) {
     const formData = new FormData(form);
     const now = new Date().toISOString();
+    const status = quick ? 'inbox' : String(formData.get('status') || 'inbox');
     const idea = {
       id: uid(),
       title: String(formData.get('title') || '').trim(),
@@ -1046,7 +1441,8 @@
       mvp: '',
       nextAction: '',
       finishLine: '',
-      status: quick ? 'inbox' : String(formData.get('status') || 'inbox'),
+      status,
+      completedAt: status === 'done' ? now : null,
       tags: quick ? [] : String(formData.get('tags') || '').split(',').map((tag) => tag.trim()).filter(Boolean).slice(0, 8),
       interest: 3,
       value: 3,
@@ -1077,6 +1473,7 @@
     if (!idea) return;
     const formData = new FormData(form);
     const oldStatus = idea.status;
+    const previousUpdatedAt = idea.updatedAt;
     idea.title = String(formData.get('title') || '').trim();
     idea.problem = String(formData.get('problem') || '').trim();
     idea.audience = String(formData.get('audience') || '').trim();
@@ -1094,6 +1491,9 @@
     idea.experimentGoal = String(formData.get('experimentGoal') || '').trim();
     idea.experimentResult = String(formData.get('experimentResult') || '').trim();
     idea.updatedAt = new Date().toISOString();
+    idea.completedAt = idea.status === 'done'
+      ? (oldStatus === 'done' ? idea.completedAt || previousUpdatedAt || idea.updatedAt : idea.updatedAt)
+      : null;
     if (oldStatus !== 'try' && idea.status === 'try') state.focusId = idea.id;
     if (state.focusId === idea.id && idea.status !== 'try') state.focusId = state.ideas.find((item) => item.status === 'try' && item.id !== idea.id)?.id || null;
     saveData('已保存修改');
@@ -1213,7 +1613,14 @@
     if (!idea || !node) return;
     const field = input.dataset.nodeField;
     if (field === 'status' && !NODE_STATUS_LABELS[input.value]) return;
+    const previousStatus = node.status;
+    const previousUpdatedAt = node.updatedAt;
     node[field] = field === 'title' ? input.value.trim() || '未命名节点' : input.value.trim();
+    if (field === 'status') {
+      node.completedAt = node.status === 'completed'
+        ? (previousStatus === 'completed' ? node.completedAt || previousUpdatedAt || new Date().toISOString() : new Date().toISOString())
+        : null;
+    }
     if (field === 'title' && idea.currentNodeId === node.id) {
       idea.nextAction = autoNodeAction(node);
       const nextActionInput = $('#detailNextAction');
@@ -1491,8 +1898,13 @@
   function moveIdea(id, status) {
     const idea = ideaById(id);
     if (!idea) return;
+    const previousStatus = idea.status;
+    const previousUpdatedAt = idea.updatedAt;
     idea.status = status;
     idea.updatedAt = new Date().toISOString();
+    idea.completedAt = status === 'done'
+      ? (previousStatus === 'done' ? idea.completedAt || previousUpdatedAt || idea.updatedAt : idea.updatedAt)
+      : null;
     if (status === 'try' && !state.focusId) state.focusId = id;
     if (state.focusId === id && status !== 'try') state.focusId = state.ideas.find((item) => item.status === 'try' && item.id !== id)?.id || null;
     saveData('已移动到' + STATUS_LABELS[status]);
@@ -1503,9 +1915,12 @@
   function markDone(id) {
     const idea = ideaById(id);
     if (!idea) return;
+    const previousStatus = idea.status;
+    const previousUpdatedAt = idea.updatedAt;
     idea.status = 'done';
     idea.experimentStatus = 'completed';
     idea.updatedAt = new Date().toISOString();
+    idea.completedAt = previousStatus === 'done' ? idea.completedAt || previousUpdatedAt || idea.updatedAt : idea.updatedAt;
     if (state.focusId === id) state.focusId = state.ideas.find((item) => item.status === 'try' && item.id !== id)?.id || null;
     saveData('已标记完成');
     if (state.route.page === 'idea') navigate('done');
@@ -1558,6 +1973,7 @@
         const normalized = normalizeState(parsed);
         state.ideas = normalized.ideas;
         state.focusId = normalized.focusId;
+        state.weeklyReports = normalized.weeklyReports;
         state.review = normalized.review;
         saveData('已导入备份');
         renderApp();
@@ -1817,9 +2233,11 @@
   }
 
   async function initializeData() {
-    const stored = await loadData();
+    const [stored, weeklyAutomation] = await Promise.all([loadData(), loadWeeklyAutomation()]);
     state.ideas = stored.ideas;
     state.focusId = stored.focusId;
+    state.weeklyReports = stored.weeklyReports;
+    state.weeklyAutomation = weeklyAutomation;
     state.review = stored.review;
     state.revision = stored.revision;
     state.persistence = stored.persistence;

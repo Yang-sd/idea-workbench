@@ -28,6 +28,22 @@ docker compose up -d --build
 
 容器监听宿主机 `127.0.0.1:8184`，适合由 NAS 上的 Cloudflare Tunnel 或反向代理接入。健康检查地址是 `/healthz`。
 
+## 每周自动复盘
+
+Docker Compose 默认启用 NAS 内的周报定时器，不依赖浏览器保持打开。任务固定在每周一 `09:00`（`Asia/Shanghai`）运行，统计区间为上周一 `00:00`（含）到本周一 `00:00`（不含）。报告汇总新增、更新和完成的想法，完成及进行中的节点，并列出进行中项目的当前阶段、当前节点、进度和持续时间。
+
+自动报告保存在 `data/state.json` 的 `weeklyReports` 中，滚动保留最近 52 周，并和页面上原有的手动复盘内容同时展示。容器重启不会丢失报告；同一统计周只会保存一份自动报告。
+
+邮件是可选能力。复制 `.env.example` 为 `.env` 后，可按邮件服务商要求填写 `IDEA_DESK_SMTP_*` 和 `IDEA_DESK_WEEKLY_RECIPIENTS`。`IDEA_DESK_SMTP_SECURITY=starttls` 通常使用端口 `587`，`ssl` 通常使用端口 `465`。需要认证的服务必须同时填写用户名和密码（通常是邮箱授权码而非登录密码）；默认的主机、发件人、收件人和凭据均为空，因此只生成报告，不会连接 SMTP 或发送邮件。
+
+无需发送邮件即可检查定时器状态：
+
+```bash
+curl -fsS http://127.0.0.1:8184/api/weekly-automation | python3 -m json.tool
+```
+
+默认配置应显示 `enabled: true`、`configured: false`，并返回 `timezone`、`schedule` 和 `nextRunAt`，响应只包含配置状态，不包含 SMTP 用户名或密码。项目没有提供公开的“立即发送”接口，避免在默认无登录部署下被滥用。
+
 ## 数据存储
 
 - 正常运行时，网页通过同源 `/api/state` API 将完整状态保存到 NAS 项目目录的 `data/state.json`。
@@ -54,6 +70,7 @@ NAS 账号、目录规范、凭据读取、部署命令和 Cloudflare Tunnel 配
 - 可无限嵌套的项目节点树、同层级即时拖动排序、自动连续编号、批量录入、节点状态和截图附件
 - 48 小时最小实验的目标、状态和结果记录
 - 搜索、标签筛选、排序、本周复盘视图
+- 每周一由 NAS 自动生成复盘报告，可选通过 SMTP 发送邮件通知
 - Ideas 2.0 研发驾驶舱，汇总项目、当前阶段、节点进度与准备度
 - 项目详情的阶段导航和准备度检查预览
 - NAS 自动保存，支持 JSON 导入和导出
