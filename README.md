@@ -14,17 +14,17 @@ python3 server.py
 
 然后访问 <http://localhost:8124/#/all>。
 
-本地需要验证认证时，可以同时设置 `IDEA_DESK_USERNAME` 和 `IDEA_DESK_PASSWORD`。只设置其中一个会拒绝启动；Docker/NAS 部署默认强制要求两项凭据。
+需要验证认证时，可以同时设置 `IDEA_DESK_USERNAME` 和 `IDEA_DESK_PASSWORD`；只设置其中一个会拒绝启动。Docker/NAS 是否强制登录由 `IDEA_DESK_REQUIRE_AUTH` 控制。
 
 只用 `python3 -m http.server` 也能查看静态页面，但不会提供数据 API，保存时会退回浏览器本地缓存。
 
 ## Docker 部署
 
 ```bash
-cp .env.example .env
-# 在 .env 中换成长随机密码，不要提交该文件
 docker compose up -d --build
 ```
+
+默认不启用登录。公网使用时建议复制 `.env.example` 为 `.env`，将 `IDEA_DESK_REQUIRE_AUTH` 改为 `true`，并配置用户名和长随机密码；`.env` 不得提交。
 
 容器监听宿主机 `127.0.0.1:8184`，适合由 NAS 上的 Cloudflare Tunnel 或反向代理接入。健康检查地址是 `/healthz`。
 
@@ -37,7 +37,7 @@ docker compose up -d --build
 - Docker Compose 通过 `./data:/app/data` 持久化数据，重建容器不会删除数据。
 - 浏览器仍保留一份本地缓存，用于 NAS 暂时不可用时继续使用；NAS 恢复后下一次保存会重新同步。
 - 首次打开新部署时，如果 NAS 尚无状态文件，网页会自动把当前浏览器里的旧数据迁移到 NAS。
-- Docker/NAS 部署使用整站 Basic Auth；`/healthz` 保持匿名可用，便于容器和 Tunnel 健康检查。
+- Docker/NAS 部署可选整站 Basic Auth；启用后仅 `/healthz` 保持匿名可用，便于容器和 Tunnel 健康检查。
 - 浏览器整包保存使用状态修订和 `If-Match`，与 AI 节点 PATCH 冲突时返回 409，不再静默覆盖较新的 NAS 数据。
 - 静态服务器只开放首页、CSS、JS 和受控 `/uploads/<id>`；源码、`data` 和目录列表均不可通过公网读取。
 

@@ -61,16 +61,14 @@ NAS 的非交互式 SSH 环境不会自动包含 Container Manager 的路径。�
 /usr/local/bin/docker
 ```
 
-首次部署或升级认证前，在项目目录创建只读备份，并配置只保存在 NAS 的 `.env`：
+首次部署或升级前，在项目目录创建只读备份：
 
 ```bash
 cd /var/services/homes/deploy/project/idea-workbench
 cp -a data "data.before-$(date +%Y%m%d-%H%M%S)"
-cp .env.example .env
-chmod 600 .env
 ```
 
-把 `.env` 中的示例密码替换为长随机密码。`.env` 已被 Git 忽略，不得同步回本机仓库、日志或聊天记录。
+默认不启用登录。需要整站 Basic Auth 时，再复制 `.env.example` 为 `.env`，将 `IDEA_DESK_REQUIRE_AUTH` 改为 `true`，配置用户名和长随机密码，并执行 `chmod 600 .env`。`.env` 已被 Git 忽略，不得同步回本机仓库、日志或聊天记录。
 
 随后在 NAS 上执行：
 
@@ -85,7 +83,7 @@ curl -fsS http://127.0.0.1:8184/healthz
 
 备份时需要完整备份 `data` 目录。网页导出的 JSON 只包含上传文件地址，不包含文件二进制内容。
 
-生产 Compose 强制配置 `IDEA_DESK_USERNAME` 和 `IDEA_DESK_PASSWORD`，整站和全部 `/api/*`、`/uploads/*` 使用 Basic Auth。缺少任一凭据时容器拒绝启动；`/healthz` 是唯一匿名入口。当前仍是单 Workspace 个人应用，后续多人化时还需要实体级授权和租户隔离。
+生产 Compose 默认不启用登录；知道域名的人可以访问页面和 API，因此只适合明确接受该风险的个人环境。设置 `IDEA_DESK_REQUIRE_AUTH=true` 后，必须同时配置 `IDEA_DESK_USERNAME` 和 `IDEA_DESK_PASSWORD`，整站和全部 `/api/*`、`/uploads/*` 使用 Basic Auth，且 `/healthz` 是唯一匿名入口。当前仍是单 Workspace 个人应用，后续多人化时还需要实体级授权和租户隔离。
 
 静态服务使用白名单，公网不得访问 `/data/*`、`/server.py`、`/README.md` 或目录列表。附件响应使用 `private, no-store`，避免经过浏览器或边缘节点长期公共缓存。
 
@@ -126,7 +124,7 @@ ok
 
 健康检查同时验证数据目录可读写、`state.json` 可解析，以及已存在的上传和备份目录可用；状态损坏时返回 503 `unhealthy`。
 
-发布后还要验证以下路径：匿名访问首页返回 401，认证访问首页返回 200，`/data/state.json`、`/data/`、`/data/uploads/` 和 `/server.py` 均返回 404。
+发布后还要验证以下路径：未启用认证时首页返回 200；启用认证时匿名首页返回 401、认证首页返回 200；两种模式下 `/data/state.json`、`/data/`、`/data/uploads/` 和 `/server.py` 均返回 404。
 
 ## 文件同步
 

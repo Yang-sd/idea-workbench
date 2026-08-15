@@ -6,9 +6,9 @@ services:
     restart: unless-stopped
     environment:
       PORT: "8080"
-      IDEA_DESK_REQUIRE_AUTH: "true"
-      IDEA_DESK_USERNAME: "${IDEA_DESK_USERNAME:?set IDEA_DESK_USERNAME in the NAS environment}"
-      IDEA_DESK_PASSWORD: "${IDEA_DESK_PASSWORD:?set IDEA_DESK_PASSWORD in the NAS environment}"
+      IDEA_DESK_REQUIRE_AUTH: "${IDEA_DESK_REQUIRE_AUTH:-false}"
+      IDEA_DESK_USERNAME: "${IDEA_DESK_USERNAME:-}"
+      IDEA_DESK_PASSWORD: "${IDEA_DESK_PASSWORD:-}"
     ports:
       - "127.0.0.1:8184:8080"
     volumes:
